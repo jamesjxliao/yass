@@ -323,6 +323,11 @@ def evaluate(
         output_path=out_dir / "equity_curve.png",
         price_data=all_prices,
         benchmark_tickers=["SPY", "QQQ"],
+        metrics={
+            "sharpe": report.strategy_metrics.sharpe_ratio,
+            "cagr": report.strategy_metrics.cagr,
+            "max_drawdown": report.strategy_metrics.max_drawdown,
+        },
     )
 
     plot_monthly_heatmap(

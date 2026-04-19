@@ -51,6 +51,7 @@ def plot_equity_curve(
     price_data=None,
     benchmark_tickers: list[str] | None = None,
     strategy_label: str = "Strategy",
+    metrics: dict | None = None,
 ) -> None:
     """Plot cumulative equity curves for strategy vs benchmarks."""
     from dateutil.relativedelta import relativedelta
@@ -70,7 +71,19 @@ def plot_equity_curve(
     end_date = dates[-1]
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), height_ratios=[3, 1])
-    fig.suptitle("Signal Evaluation", fontsize=14, fontweight="bold")
+
+    title = "YASS — Backtest Results"
+    if metrics:
+        parts = []
+        if "sharpe" in metrics:
+            parts.append(f"Sharpe {metrics['sharpe']:.2f}")
+        if "cagr" in metrics:
+            parts.append(f"CAGR {metrics['cagr']:.1%}")
+        if "max_drawdown" in metrics:
+            parts.append(f"MaxDD {metrics['max_drawdown']:.1%}")
+        if parts:
+            title += "  |  " + "  |  ".join(parts)
+    fig.suptitle(title, fontsize=13, fontweight="bold")
 
     # Plot strategy
     ax1.plot(dates, strat_cum, label=strategy_label, color="#2563eb", linewidth=2)
