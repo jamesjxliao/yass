@@ -15,13 +15,13 @@ filters:
 
 signals:
   - name: quality_score
-    weight: 0.25
+    weight: 0.30
+
+  - name: quality_momentum
+    weight: 0.20
 
   - name: value_composite
-    weight: 0.25
+    weight: 0.30
 
   - name: momentum
-    weight: 0.25
-
-  - name: earnings_growth
-    weight: 0.25
+    weight: 0.20
