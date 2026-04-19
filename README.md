@@ -62,7 +62,7 @@ poetry run streamlit run app.py
 
 No FMP key? No problem — the screener falls back to mock data so you can explore immediately.
 
-> **Data provider:** YASS uses [Financial Modeling Prep (FMP)](https://financialmodelingprep.com/) for market data. A free FMP plan works for basic screening. For full historical data and backtesting, a Premium plan (~$30/mo) is recommended. Without a key, mock data is used.
+> **Data provider:** YASS uses [Financial Modeling Prep (FMP)](https://financialmodelingprep.com/) for market data. Without an API key, mock data is used.
 
 ## Included Signals
 
