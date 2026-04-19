@@ -6,13 +6,11 @@
 
 Screen stocks using fundamental signals, backtest with point-in-time data, and evaluate with Monte Carlo analysis. Configure signals and weights in YAML — no code changes needed.
 
-### Sample Backtest (2017–2026)
+### Sample Backtest (2017–2026, using included `example.yaml`)
 
 ![Equity Curve](docs/images/equity_curve.png)
 
 ![Monthly Returns](docs/images/monthly_returns.png)
-
-> Results shown are from an optimized signal configuration. The included `config/example.yaml` uses a different combination and will produce different results. Experiment with signals and weights to find what works for you.
 
 ```mermaid
 flowchart LR
