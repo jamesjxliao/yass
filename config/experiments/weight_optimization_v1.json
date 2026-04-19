@@ -1,0 +1,52 @@
+{
+  "name": "weight_optimization_v1",
+  "hypothesis": "Testing whether shifting weight toward momentum or value improves recent performance (2021-2026)",
+  "base_config": "config/default.yaml",
+  "variations": [
+    {
+      "name": "baseline_40_35_25",
+      "signals": [
+        {"name": "momentum_12m", "weight": 0.40},
+        {"name": "value_composite", "weight": 0.35},
+        {"name": "quality_score", "weight": 0.25}
+      ]
+    },
+    {
+      "name": "momentum_heavy_60_25_15",
+      "signals": [
+        {"name": "momentum_12m", "weight": 0.60},
+        {"name": "value_composite", "weight": 0.25},
+        {"name": "quality_score", "weight": 0.15}
+      ]
+    },
+    {
+      "name": "value_heavy_25_50_25",
+      "signals": [
+        {"name": "momentum_12m", "weight": 0.25},
+        {"name": "value_composite", "weight": 0.50},
+        {"name": "quality_score", "weight": 0.25}
+      ]
+    },
+    {
+      "name": "quality_heavy_30_30_40",
+      "signals": [
+        {"name": "momentum_12m", "weight": 0.30},
+        {"name": "value_composite", "weight": 0.30},
+        {"name": "quality_score", "weight": 0.40}
+      ]
+    }
+  ],
+  "backtest": {
+    "start_date": "2017-01-01",
+    "end_date": "2026-01-01",
+    "rebalance_frequency": "monthly",
+    "top_n": 20,
+    "walk_forward": true
+  },
+  "guardrails": {
+    "holdout_start": "2024-01-01",
+    "max_experiments": 50,
+    "min_sharpe_threshold": 0.3,
+    "min_sample_size": 30
+  }
+}

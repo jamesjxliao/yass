@@ -1,0 +1,54 @@
+{
+  "name": "new_signals_v1",
+  "hypothesis": "Testing 3 novel signals: vol-adjusted momentum, capital efficiency, and low-leverage growth vs baseline",
+  "base_config": "config/default.yaml",
+  "variations": [
+    {
+      "name": "baseline",
+      "signals": [
+        {"name": "momentum_12m", "weight": 0.4},
+        {"name": "value_composite", "weight": 0.35},
+        {"name": "quality_score", "weight": 0.25}
+      ]
+    },
+    {
+      "name": "vol_adj_momentum_swap",
+      "signals": [
+        {"name": "vol_adj_momentum", "weight": 0.4},
+        {"name": "value_composite", "weight": 0.35},
+        {"name": "quality_score", "weight": 0.25}
+      ]
+    },
+    {
+      "name": "add_capital_efficiency",
+      "signals": [
+        {"name": "momentum_12m", "weight": 0.3},
+        {"name": "value_composite", "weight": 0.25},
+        {"name": "quality_score", "weight": 0.15},
+        {"name": "capital_efficiency", "weight": 0.3}
+      ]
+    },
+    {
+      "name": "add_low_leverage_growth",
+      "signals": [
+        {"name": "momentum_12m", "weight": 0.25},
+        {"name": "value_composite", "weight": 0.25},
+        {"name": "quality_score", "weight": 0.15},
+        {"name": "low_leverage_growth", "weight": 0.35}
+      ]
+    }
+  ],
+  "backtest": {
+    "start_date": "2017-01-01",
+    "end_date": "2026-01-01",
+    "rebalance_frequency": "monthly",
+    "top_n": 20,
+    "walk_forward": true
+  },
+  "guardrails": {
+    "holdout_start": "2024-01-01",
+    "max_experiments": 50,
+    "min_sharpe_threshold": 0.3,
+    "min_sample_size": 30
+  }
+}

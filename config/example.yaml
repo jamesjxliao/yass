@@ -1,0 +1,27 @@
+universe: sp500
+top_n: 10
+rebalance_frequency: monthly
+position_stop_loss: 0.15
+hold_bonus: 1.0
+
+filters:
+  - name: market_cap_filter
+    params:
+      min_cap: 1_000_000_000
+
+  - name: volume_filter
+    params:
+      min_avg_volume: 500_000
+
+signals:
+  - name: quality_score
+    weight: 0.25
+
+  - name: value_composite
+    weight: 0.25
+
+  - name: momentum
+    weight: 0.25
+
+  - name: earnings_growth
+    weight: 0.25

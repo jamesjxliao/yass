@@ -1,0 +1,48 @@
+{
+  "name": "earnings_growth_v1",
+  "hypothesis": "Does earnings growth acceleration add value beyond momentum + value + quality + low-leverage growth?",
+  "base_config": "config/default.yaml",
+  "variations": [
+    {
+      "name": "baseline_4signals",
+      "signals": [
+        {"name": "momentum_12m", "weight": 0.25},
+        {"name": "value_composite", "weight": 0.25},
+        {"name": "quality_score", "weight": 0.15},
+        {"name": "low_leverage_growth", "weight": 0.35}
+      ]
+    },
+    {
+      "name": "replace_value_with_earnings",
+      "signals": [
+        {"name": "momentum_12m", "weight": 0.30},
+        {"name": "earnings_growth", "weight": 0.30},
+        {"name": "quality_score", "weight": 0.15},
+        {"name": "low_leverage_growth", "weight": 0.25}
+      ]
+    },
+    {
+      "name": "add_earnings_5th_signal",
+      "signals": [
+        {"name": "momentum_12m", "weight": 0.20},
+        {"name": "value_composite", "weight": 0.20},
+        {"name": "quality_score", "weight": 0.10},
+        {"name": "low_leverage_growth", "weight": 0.25},
+        {"name": "earnings_growth", "weight": 0.25}
+      ]
+    }
+  ],
+  "backtest": {
+    "start_date": "2017-01-01",
+    "end_date": "2026-01-01",
+    "rebalance_frequency": "monthly",
+    "top_n": 20,
+    "walk_forward": true
+  },
+  "guardrails": {
+    "holdout_start": "2024-01-01",
+    "max_experiments": 50,
+    "min_sharpe_threshold": 0.3,
+    "min_sample_size": 30
+  }
+}

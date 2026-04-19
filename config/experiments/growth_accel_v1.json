@@ -1,0 +1,57 @@
+{
+  "name": "growth_accel_v1",
+  "hypothesis": "Does growth acceleration (EPS/revenue second derivative) improve our best strategy?",
+  "base_config": "config/default.yaml",
+  "variations": [
+    {
+      "name": "best_current",
+      "signals": [
+        {"name": "momentum_12m", "weight": 0.30},
+        {"name": "earnings_growth", "weight": 0.30},
+        {"name": "quality_score", "weight": 0.15},
+        {"name": "low_leverage_growth", "weight": 0.25}
+      ]
+    },
+    {
+      "name": "replace_earnings_with_accel",
+      "signals": [
+        {"name": "momentum_12m", "weight": 0.30},
+        {"name": "growth_acceleration", "weight": 0.30},
+        {"name": "quality_score", "weight": 0.15},
+        {"name": "low_leverage_growth", "weight": 0.25}
+      ]
+    },
+    {
+      "name": "add_accel_5th_signal",
+      "signals": [
+        {"name": "momentum_12m", "weight": 0.25},
+        {"name": "earnings_growth", "weight": 0.20},
+        {"name": "quality_score", "weight": 0.10},
+        {"name": "low_leverage_growth", "weight": 0.20},
+        {"name": "growth_acceleration", "weight": 0.25}
+      ]
+    },
+    {
+      "name": "accel_heavy",
+      "signals": [
+        {"name": "momentum_12m", "weight": 0.20},
+        {"name": "growth_acceleration", "weight": 0.40},
+        {"name": "quality_score", "weight": 0.15},
+        {"name": "low_leverage_growth", "weight": 0.25}
+      ]
+    }
+  ],
+  "backtest": {
+    "start_date": "2017-01-01",
+    "end_date": "2026-01-01",
+    "rebalance_frequency": "monthly",
+    "top_n": 20,
+    "walk_forward": true
+  },
+  "guardrails": {
+    "holdout_start": "2024-01-01",
+    "max_experiments": 50,
+    "min_sharpe_threshold": 0.3,
+    "min_sample_size": 30
+  }
+}

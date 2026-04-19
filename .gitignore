@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+
+# Environment
+.env
+
+# Data
+data/*.duckdb
+data/*.duckdb.wal
+data/*.json
+data/*.png
+data/*.txt
+
+# Results
+results/
+
+# Autoresearch
+run.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Sync tooling (private repo only)
+private-files.txt
+sync-to-public.sh
+
+# OS
+.DS_Store

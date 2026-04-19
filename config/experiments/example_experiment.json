@@ -1,0 +1,35 @@
+{
+  "name": "momentum_value_blend_v1",
+  "hypothesis": "Adding quality factor improves risk-adjusted returns vs pure momentum-value blend",
+  "base_config": "config/default.yaml",
+  "variations": [
+    {
+      "name": "momentum_value_only",
+      "signals": [
+        {"name": "momentum_12m", "weight": 0.6},
+        {"name": "value_composite", "weight": 0.4}
+      ]
+    },
+    {
+      "name": "with_quality",
+      "signals": [
+        {"name": "momentum_12m", "weight": 0.4},
+        {"name": "value_composite", "weight": 0.35},
+        {"name": "quality_score", "weight": 0.25}
+      ]
+    }
+  ],
+  "backtest": {
+    "start_date": "2024-01-01",
+    "end_date": "2024-12-31",
+    "rebalance_frequency": "monthly",
+    "top_n": 10,
+    "walk_forward": true
+  },
+  "guardrails": {
+    "holdout_start": "2024-07-01",
+    "max_experiments": 50,
+    "min_sharpe_threshold": 0.0,
+    "min_sample_size": 3
+  }
+}
