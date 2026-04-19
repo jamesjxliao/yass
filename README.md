@@ -2,7 +2,7 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![CI](https://img.shields.io/badge/CI-passing-brightgreen.svg)](.github/workflows/ci.yml)
+[![CI](https://github.com/jamesjxliao/yass/actions/workflows/ci.yml/badge.svg)](https://github.com/jamesjxliao/yass/actions/workflows/ci.yml)
 
 Screen stocks using fundamental signals, backtest with point-in-time data, and evaluate with Monte Carlo analysis. Configure signals and weights in YAML — no code changes needed.
 
@@ -56,11 +56,13 @@ poetry run screener backtest
 # Full evaluation (Monte Carlo, factor attribution, regime analysis)
 poetry run screener evaluate
 
-# Launch the dashboard
+# Launch the dashboard (requires data — run fetch-history first, or explore with mock data)
 poetry run streamlit run app.py
 ```
 
 No FMP key? No problem — the screener falls back to mock data so you can explore immediately.
+
+> **Data provider:** YASS uses [Financial Modeling Prep (FMP)](https://financialmodelingprep.com/) for market data. A free FMP plan works for basic screening. For full historical data and backtesting, a Premium plan (~$30/mo) is recommended. Without a key, mock data is used.
 
 ## Included Signals
 
@@ -204,3 +206,7 @@ Contributions are welcome.
 ## License
 
 [Apache 2.0](LICENSE)
+
+## Disclaimer
+
+This software is for educational and informational purposes only. It is not investment advice. Past backtest performance does not guarantee future results. Always do your own research before making investment decisions.
