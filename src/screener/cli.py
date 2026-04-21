@@ -72,6 +72,7 @@ def screen(
     top_n: Annotated[int, typer.Option(help="Number of top candidates")] = 20,
     output: Annotated[str, typer.Option(help="Output: console, json, csv")] = "console",
     output_path: Annotated[str, typer.Option(help="Output file path")] = "",
+    as_of: Annotated[str, typer.Option(help="Screen as of date (YYYY-MM-DD), uses PIT data")] = "",
     verbose: Annotated[bool, typer.Option("--verbose")] = False,
 ) -> None:
     """Run the screener with the given config and output top N candidates."""
@@ -85,13 +86,25 @@ def screen(
     pipeline = _build_pipeline(pipeline_config, settings, top_n=top_n)
 
     provider, cache = _make_provider(settings)
-    tickers = provider.get_universe(pipeline_config.universe)
-    df = provider.get_fundamentals(tickers)
 
-    # Fetch ~13 months of price history for momentum + SMA computation
-    yesterday = date.today() - timedelta(days=1)
-    prices = provider.get_prices(tickers, yesterday - timedelta(days=400), yesterday)
-    df = enrich_with_price_data(df, prices)
+    if as_of:
+        as_of_date = date.fromisoformat(as_of)
+        pit_server = _make_pit_server(provider, cache, pipeline_config)
+        tickers = pit_server.get_universe_as_of(
+            pipeline_config.universe, as_of_date
+        )
+        df = pit_server.get_screening_data(tickers, as_of_date)
+        prices = cache.get_prices(
+            tickers, str(as_of_date - timedelta(days=400)), str(as_of_date)
+        )
+        df = enrich_with_price_data(df, prices)
+        typer.echo(f"Screening as of {as_of_date} ({len(tickers)} tickers)")
+    else:
+        tickers = provider.get_universe(pipeline_config.universe)
+        df = provider.get_fundamentals(tickers)
+        yesterday = date.today() - timedelta(days=1)
+        prices = provider.get_prices(tickers, yesterday - timedelta(days=400), yesterday)
+        df = enrich_with_price_data(df, prices)
 
     result = pipeline.run(df)
 
