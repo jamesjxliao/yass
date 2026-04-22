@@ -489,9 +489,11 @@ def trade(
         raise typer.Exit(1)
 
     pipeline_config = PipelineConfig.from_yaml(config)
-    pipeline = _build_pipeline(pipeline_config, settings)
+    # Screen with extra rows so we capture scores for held positions that hold
+    # bonus may pull into picks. Take top N for actual picks.
+    screen_top_n = max(50, pipeline_config.top_n * 5)
+    pipeline = _build_pipeline(pipeline_config, settings, top_n=screen_top_n)
 
-    # Screen for picks
     provider, cache = _make_provider(settings)
     tickers = provider.get_universe(pipeline_config.universe)
 
@@ -499,12 +501,13 @@ def trade(
     prices = provider.get_prices(tickers, yesterday - timedelta(days=400), yesterday)
     fundamentals = provider.get_fundamentals(tickers)
     enriched = enrich_with_price_data(fundamentals, prices)
-    result = pipeline.run(enriched)
+    extended_result = pipeline.run(enriched)
 
-    if result.is_empty():
+    if extended_result.is_empty():
         typer.echo("No stocks passed filters")
         raise typer.Exit(1)
 
+    result = extended_result.head(pipeline_config.top_n)
     picks = result["ticker"].to_list()
     typer.echo(f"Target portfolio ({len(picks)} stocks): {', '.join(picks)}")
 
@@ -557,6 +560,10 @@ def trade(
     trade_dir.mkdir(parents=True, exist_ok=True)
     log_file = trade_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
 
+    z_cols = [c for c in extended_result.columns if c.startswith("z_")]
+    score_cols = ["ticker", "composite_score", "sector", *z_cols]
+    screen_results = extended_result.select(score_cols).to_dicts()
+
     trade_log = {
         "date": str(date.today()),
         "mode": broker.mode,
@@ -569,6 +576,7 @@ def trade(
              "notional": o.notional, "status": o.status}
             for o in (orders if orders else [])
         ],
+        "screen_results": screen_results,
     }
     with open(log_file, "w") as f:
         json.dump(trade_log, f, indent=2)
