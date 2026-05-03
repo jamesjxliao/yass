@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     alpaca_api_key: str = ""
     alpaca_secret_key: str = ""
     alpaca_paper: bool = True
+    etoro_api_key: str = ""
+    etoro_user_key: str = ""
+    etoro_demo: bool = True
     db_path: Path = Path("data/screener.duckdb")
     cache_ttl_hours: int = 24
     default_universe: str = "sp500"

@@ -588,6 +588,127 @@ def trade(
     cache.close()
 
 
+@app.command("etoro-trade")
+def etoro_trade(
+    config: Annotated[Path, typer.Option(help="Config YAML")] = Path("config/default.yaml"),
+    dry_run: Annotated[bool, typer.Option(help="Show orders without executing")] = True,
+    verbose: Annotated[bool, typer.Option("--verbose")] = False,
+) -> None:
+    """Rebalance portfolio via eToro (demo or real trading)."""
+    _setup_logging(verbose)
+
+    from screener.engine.pipeline import enrich_with_price_data
+    from screener.trading.etoro import EtoroBroker
+
+    settings = Settings()
+    if not settings.etoro_api_key or not settings.etoro_user_key:
+        typer.echo("Set ETORO_API_KEY and ETORO_USER_KEY in .env")
+        raise typer.Exit(1)
+
+    pipeline_config = PipelineConfig.from_yaml(config)
+    screen_top_n = max(50, pipeline_config.top_n * 5)
+    pipeline = _build_pipeline(pipeline_config, settings, top_n=screen_top_n)
+
+    provider, cache = _make_provider(settings)
+    tickers = provider.get_universe(pipeline_config.universe)
+
+    yesterday = date.today() - timedelta(days=1)
+    prices = provider.get_prices(tickers, yesterday - timedelta(days=400), yesterday)
+    fundamentals = provider.get_fundamentals(tickers)
+    enriched = enrich_with_price_data(fundamentals, prices)
+    extended_result = pipeline.run(enriched)
+
+    if extended_result.is_empty():
+        typer.echo("No stocks passed filters")
+        raise typer.Exit(1)
+
+    result = extended_result.head(pipeline_config.top_n)
+    picks = result["ticker"].to_list()
+    typer.echo(f"Target portfolio ({len(picks)} stocks): {', '.join(picks)}")
+
+    broker = EtoroBroker(
+        settings.etoro_api_key, settings.etoro_user_key,
+        demo=settings.etoro_demo,
+    )
+    typer.echo(f"Mode: {broker.mode}")
+
+    # Pre-resolve instrument IDs for target tickers
+    resolved = broker.resolve_instrument_ids(picks)
+    unresolved = set(picks) - set(resolved.keys())
+    if unresolved:
+        typer.echo(f"Warning: could not resolve eToro instrument IDs for: {', '.join(unresolved)}")
+        picks = [t for t in picks if t in resolved]
+
+    account = broker.get_account()
+    typer.echo(f"Equity: ${account['equity']:,.2f}  Cash: ${account['cash']:,.2f}")
+
+    # Resolve instrument IDs for current positions
+    current = broker.get_positions()
+    if current:
+        typer.echo(f"Current positions: {', '.join(current.keys())}")
+    else:
+        typer.echo("No current positions")
+
+    orders = broker.compute_rebalance_orders(picks, account)
+
+    if not orders:
+        typer.echo("Portfolio already balanced — no trades needed")
+    else:
+        typer.echo(f"\nOrders ({'DRY RUN' if dry_run else 'LIVE'}):")
+        for o in orders:
+            typer.echo(f"  {o.side.upper():<5} {o.ticker:<6} ${o.notional:>10,.2f}")
+
+        if not dry_run and not settings.etoro_demo:
+            typer.echo("\nWARNING: LIVE TRADING — orders will execute with real money!")
+
+        results = broker.execute_orders(
+            orders, dry_run=dry_run,
+            stop_loss_pct=pipeline_config.position_stop_loss,
+        )
+
+        submitted = sum(1 for o in results if o.status == "submitted")
+        errors = sum(1 for o in results if o.status.startswith("error"))
+        if not dry_run:
+            typer.echo(f"\n{submitted} orders submitted, {errors} errors")
+
+    if dry_run:
+        typer.echo("\nThis was a dry run. Use --no-dry-run to execute trades.")
+
+    # Save trade log
+    from datetime import datetime
+
+    trade_dir = Path("results/trades")
+    trade_dir.mkdir(parents=True, exist_ok=True)
+    log_file = trade_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_etoro.json"
+
+    z_cols = [c for c in extended_result.columns if c.startswith("z_")]
+    score_cols = ["ticker", "composite_score", "sector", *z_cols]
+    if "company_name" in extended_result.columns:
+        score_cols.append("company_name")
+    screen_results = extended_result.select(score_cols).to_dicts()
+
+    trade_log = {
+        "date": str(date.today()),
+        "broker": "etoro",
+        "mode": broker.mode,
+        "dry_run": dry_run,
+        "account": account,
+        "picks": picks,
+        "previous_positions": list(current.keys()),
+        "orders": [
+            {"ticker": o.ticker, "side": o.side,
+             "notional": o.notional, "status": o.status}
+            for o in (orders if orders else [])
+        ],
+        "screen_results": screen_results,
+    }
+    with open(log_file, "w") as f:
+        json.dump(trade_log, f, indent=2)
+    typer.echo(f"Trade log: {log_file}")
+
+    cache.close()
+
+
 @app.command("list-plugins")
 def list_plugins(
     verbose: Annotated[bool, typer.Option("--verbose")] = False,
