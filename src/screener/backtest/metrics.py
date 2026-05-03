@@ -17,6 +17,7 @@ class BacktestMetrics:
     walk_forward_consistency: float  # % of folds with Sharpe > 0
     total_return: float
     periodic_returns: list[float] = field(default_factory=list)
+    total_swaps: int = 0
 
     @property
     def is_statistically_significant(self) -> bool:
@@ -24,13 +25,15 @@ class BacktestMetrics:
 
     def summary(self) -> str:
         flag = "" if self.is_statistically_significant else " [INSUFFICIENT DATA]"
+        avg_swaps = self.total_swaps / self.sample_size if self.sample_size else 0
         return (
             f"Sharpe: {self.sharpe_ratio:.3f} | "
             f"CAGR: {self.cagr:.2%} | "
             f"MaxDD: {self.max_drawdown:.2%} | "
             f"Calmar: {self.calmar_ratio:.3f} | "
             f"PSR: {self.psr:.3f} | "
-            f"Trades: {self.sample_size}{flag}"
+            f"Periods: {self.sample_size} | "
+            f"Swaps: {self.total_swaps} ({avg_swaps:.1f}/mo){flag}"
         )
 
 
@@ -92,6 +95,7 @@ def compute_metrics_from_returns(
     periods_per_year: int = 12,
     n_years: float | None = None,
     walk_forward_consistency: float = 0.0,
+    total_swaps: int = 0,
 ) -> BacktestMetrics:
     """Compute all backtest metrics from a series of periodic returns."""
     cumulative = (1 + periodic_returns).cum_prod()
@@ -121,4 +125,5 @@ def compute_metrics_from_returns(
         walk_forward_consistency=walk_forward_consistency,
         total_return=total_return,
         periodic_returns=periodic_returns.to_list(),
+        total_swaps=total_swaps,
     )

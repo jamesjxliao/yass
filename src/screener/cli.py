@@ -123,9 +123,9 @@ def screen(
 @app.command()
 def backtest(
     config: Annotated[Path, typer.Option(help="Config YAML")] = Path("config/default.yaml"),
-    start_date: Annotated[str, typer.Option(help="Backtest start date")] = "2024-01-01",
-    end_date: Annotated[str, typer.Option(help="Backtest end date")] = "2024-12-31",
-    top_n: Annotated[int, typer.Option()] = 20,
+    start_date: Annotated[str, typer.Option(help="Backtest start date")] = "2017-01-01",
+    end_date: Annotated[str, typer.Option(help="Backtest end date")] = "2026-01-01",
+    top_n: Annotated[int, typer.Option()] = 10,
     verbose: Annotated[bool, typer.Option("--verbose")] = False,
 ) -> None:
     """Run backtest on a screening config."""
@@ -431,6 +431,7 @@ def lab(
     typer.echo(f"calmar: {metrics.calmar_ratio:.6f}")
     typer.echo(f"total_return: {metrics.total_return:.6f}")
     typer.echo(f"sample_size: {metrics.sample_size}")
+    typer.echo(f"total_swaps: {metrics.total_swaps}")
 
     # Benchmark comparison
     import numpy as np
@@ -562,6 +563,8 @@ def trade(
 
     z_cols = [c for c in extended_result.columns if c.startswith("z_")]
     score_cols = ["ticker", "composite_score", "sector", *z_cols]
+    if "company_name" in extended_result.columns:
+        score_cols.append("company_name")
     screen_results = extended_result.select(score_cols).to_dicts()
 
     trade_log = {

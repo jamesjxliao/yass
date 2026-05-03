@@ -91,6 +91,7 @@ def run_backtest(
 
     periodic_returns = []
     prev_picks: set[str] = set()
+    total_swaps = 0
     in_cash = False  # portfolio stop-loss state
 
     for i in range(len(rebalance_dates) - 1):
@@ -147,6 +148,8 @@ def run_backtest(
 
         # Compute turnover-based transaction cost
         turnover = _compute_turnover(prev_picks, pick_tickers)
+        if prev_picks:
+            total_swaps += len(prev_picks.symmetric_difference(pick_tickers)) // 2
         # First period: buy only (no sell), so charge 1x; subsequent: buy+sell = 2x
         cost_multiplier = 1 if not prev_picks else 2
         cost = turnover * (transaction_cost_bps / 10_000) * cost_multiplier
@@ -195,6 +198,7 @@ def run_backtest(
         returns_series,
         periods_per_year=periods_per_year,
         n_years=n_years,
+        total_swaps=total_swaps,
     )
 
 

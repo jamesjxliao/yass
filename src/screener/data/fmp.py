@@ -350,6 +350,9 @@ def _normalize_fundamentals(df: pl.DataFrame) -> pl.DataFrame:
     if "sector" in df.columns:
         exprs.append(pl.col("sector"))
 
+    if "companyName" in df.columns:
+        exprs.append(pl.col("companyName").alias("company_name"))
+
     return df.select(exprs)
 
 
