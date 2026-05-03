@@ -124,6 +124,7 @@ Change the signals, adjust the weights, run `poetry run screener backtest` to se
 - **Polars + Arrow** — Fast DataFrame operations with zero-copy interchange to DuckDB.
 - **Position stop-loss** — Caps individual stock losses per rebalance period.
 - **Hold bonus** — Z-score boost for current holdings to reduce turnover and improve after-tax returns.
+- **Broker integration** — Rebalance via Alpaca or eToro with dry-run safety, stop-losses, and trade logging.
 - **Mock data provider** — Explore the full framework without an API key.
 - **Streamlit dashboard** — Interactive UI with backtest explorer, signal deep-dive, and current screen tabs.
 
@@ -173,6 +174,7 @@ Add it to your config and backtest. No core code changes needed.
 │   ├── engine/           # Pipeline, ranking, output
 │   ├── backtest/         # Runner, walk-forward, metrics
 │   ├── evaluation/       # Monte Carlo, factor attribution, charts
+│   ├── trading/          # Broker integrations (Alpaca, eToro)
 │   └── plugins/          # Plugin discovery and registry
 ├── tests/                # Test suite
 └── app.py                # Streamlit dashboard
@@ -186,6 +188,8 @@ poetry run screener screen --top-n 10     # Run screener
 poetry run screener backtest              # Run backtest
 poetry run screener fetch-history         # Fetch historical data from FMP
 poetry run screener evaluate              # Full signal evaluation
+poetry run screener trade                 # Rebalance via Alpaca (dry run)
+poetry run screener etoro-trade           # Rebalance via eToro (dry run)
 poetry run streamlit run app.py           # Launch dashboard
 ```
 
