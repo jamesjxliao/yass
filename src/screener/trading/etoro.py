@@ -131,12 +131,23 @@ class EtoroBroker:
         resp.raise_for_status()
         data = resp.json()
 
+        # Prefer US stock over crypto/other when ticker collides
+        # (e.g., STX = Stacks crypto vs STX.US = Seagate stock)
+        stock_match = None
+        exact_match = None
         for item in data.get("items", []):
-            if item.get("internalSymbolFull") == ticker:
-                iid = item["instrumentId"]
-                self._instrument_cache[ticker] = iid
-                self._reverse_instrument_cache[iid] = ticker
-                return iid
+            symbol = item.get("internalSymbolFull", "")
+            if symbol == ticker:
+                exact_match = item
+            if symbol == f"{ticker}.US":
+                stock_match = item
+
+        match = stock_match or exact_match
+        if match:
+            iid = match["instrumentId"]
+            self._instrument_cache[ticker] = iid
+            self._reverse_instrument_cache[iid] = ticker
+            return iid
 
         logger.warning("Could not resolve instrument ID for %s", ticker)
         return None
@@ -312,8 +323,9 @@ class EtoroBroker:
             for rate in data.get("rates", []):
                 if rate.get("instrumentID") == instrument_id:
                     return float(rate.get("lastExecution", rate.get("ask", 0)))
-        except Exception:
-            pass
+            logger.warning("No rate found for instrument %d in response: %s", instrument_id, data)
+        except Exception as e:
+            logger.error("Failed to get rate for instrument %d: %s", instrument_id, e)
         return None
 
     def execute_orders(
@@ -378,6 +390,9 @@ class EtoroBroker:
         if buys:
             account = self.get_account()
             current = self.get_positions()
+            sold_tickers = {o.ticker for o in sells if o.status == "submitted"}
+            for t in sold_tickers:
+                current.pop(t, None)
             buy_tickers = {o.ticker for o in buys}
             all_target = list(set(current.keys()) | buy_tickers)
             target_value = account["equity"] / len(all_target) if all_target else 0
@@ -403,6 +418,13 @@ class EtoroBroker:
                     rate = self._get_rate(iid)
                     if rate:
                         stop_rate = rate * (1 - stop_loss_pct)
+                    else:
+                        order.status = "error: could not get rate for stop-loss"
+                        logger.error(
+                            "BUY %s — skipped, could not determine stop-loss rate",
+                            order.ticker,
+                        )
+                        continue
 
                 try:
                     self._open_position(iid, order.notional, stop_loss_rate=stop_rate)

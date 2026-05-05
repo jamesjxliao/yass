@@ -27,9 +27,5 @@ run.log
 .vscode/
 *.swp
 
-# Sync tooling (private repo only)
-private-files.txt
-sync-to-public.sh
-
 # OS
 .DS_Store

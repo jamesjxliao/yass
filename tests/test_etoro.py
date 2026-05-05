@@ -1,4 +1,6 @@
-from screener.trading.etoro import compute_equity
+from unittest.mock import MagicMock
+
+from screener.trading.etoro import EtoroBroker, compute_equity
 
 
 def test_equity_positions_only():
@@ -131,3 +133,70 @@ def test_equity_camelcase_field_variants():
     # PnL = 50
     # Equity = 2800 + 1205 + 50 = 4055
     assert result["equity"] == 4055
+
+
+class TestExecuteOrdersStopLoss:
+    """Stop-loss must be set on every buy or the buy is skipped."""
+
+    def _make_broker(self):
+        broker = EtoroBroker(api_key="k", user_key="u", demo=True)
+        broker._instrument_cache = {"AAPL": 1129, "MSFT": 1130}
+        return broker
+
+    def test_buy_skipped_when_rate_unavailable(self):
+        from screener.trading.broker import RebalanceOrder
+
+        broker = self._make_broker()
+        broker.get_account = MagicMock(return_value={
+            "equity": 10000, "cash": 5000, "buying_power": 5000, "portfolio_value": 5000,
+        })
+        broker.get_positions = MagicMock(return_value={})
+        broker.cancel_open_orders = MagicMock(return_value=0)
+        broker.get_positions_detailed = MagicMock(return_value=[])
+        broker._get_rate = MagicMock(return_value=None)
+
+        orders = [RebalanceOrder(ticker="AAPL", side="buy", notional=1000)]
+        results = broker.execute_orders(orders, dry_run=False, stop_loss_pct=0.15)
+
+        assert results[0].status == "error: could not get rate for stop-loss"
+
+    def test_buy_proceeds_when_rate_available(self):
+        from screener.trading.broker import RebalanceOrder
+
+        broker = self._make_broker()
+        broker.get_account = MagicMock(return_value={
+            "equity": 10000, "cash": 5000, "buying_power": 5000, "portfolio_value": 5000,
+        })
+        broker.get_positions = MagicMock(return_value={})
+        broker.cancel_open_orders = MagicMock(return_value=0)
+        broker.get_positions_detailed = MagicMock(return_value=[])
+        broker._get_rate = MagicMock(return_value=150.0)
+        broker._open_position = MagicMock(return_value={"orderForOpen": {}})
+
+        orders = [RebalanceOrder(ticker="AAPL", side="buy", notional=1000)]
+        results = broker.execute_orders(orders, dry_run=False, stop_loss_pct=0.15)
+
+        assert results[0].status == "submitted"
+        call_args = broker._open_position.call_args
+        assert call_args[0][0] == 1129
+        assert call_args[1]["stop_loss_rate"] == 150.0 * 0.85
+
+    def test_buy_no_stop_loss_when_pct_zero(self):
+        from screener.trading.broker import RebalanceOrder
+
+        broker = self._make_broker()
+        broker.get_account = MagicMock(return_value={
+            "equity": 10000, "cash": 5000, "buying_power": 5000, "portfolio_value": 5000,
+        })
+        broker.get_positions = MagicMock(return_value={})
+        broker.cancel_open_orders = MagicMock(return_value=0)
+        broker.get_positions_detailed = MagicMock(return_value=[])
+        broker._open_position = MagicMock(return_value={"orderForOpen": {}})
+
+        orders = [RebalanceOrder(ticker="AAPL", side="buy", notional=1000)]
+        results = broker.execute_orders(orders, dry_run=False, stop_loss_pct=0.0)
+
+        assert results[0].status == "submitted"
+        call_args = broker._open_position.call_args
+        assert call_args[0][0] == 1129
+        assert call_args[1]["stop_loss_rate"] is None
