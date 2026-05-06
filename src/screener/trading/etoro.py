@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 
@@ -119,16 +120,29 @@ class EtoroBroker:
             return f"{BASE_URL}/trading/info/demo/portfolio"
         return f"{BASE_URL}/trading/info/portfolio"
 
+    def _request_with_retry(self, method: str, url: str, **kwargs) -> httpx.Response:
+        last_resp = None
+        for attempt in range(4):
+            if attempt > 0:
+                wait = 2 ** (attempt - 1) * 3
+                logger.warning("Rate limited (429), waiting %ds before retry", wait)
+                time.sleep(wait)
+            last_resp = getattr(self._client, method)(url, **kwargs)
+            if last_resp.status_code != 429:
+                break
+        last_resp.raise_for_status()
+        return last_resp
+
     def resolve_instrument_id(self, ticker: str) -> int | None:
         if ticker in self._instrument_cache:
             return self._instrument_cache[ticker]
 
-        resp = self._client.get(
+        resp = self._request_with_retry(
+            "get",
             f"{BASE_URL}/market-data/search",
             params={"internalSymbolFull": ticker},
             headers=self._headers(),
         )
-        resp.raise_for_status()
         data = resp.json()
 
         # Prefer US stock over crypto/other when ticker collides
@@ -159,6 +173,31 @@ class EtoroBroker:
             if iid is not None:
                 result[ticker] = iid
         return result
+
+    def resolve_positions(self, candidate_tickers: list[str]) -> dict[str, float]:
+        """Resolve instrument IDs for candidates, then return positions with tickers.
+
+        Resolves candidate tickers first (populating the reverse cache),
+        then returns current positions. For any held positions not matched
+        by candidates, attempts to resolve by scanning additional tickers.
+        """
+        self.resolve_instrument_ids(candidate_tickers)
+        positions = self.get_positions()
+
+        unresolved_held = [t for t in positions if t.startswith("ID:")]
+        if not unresolved_held:
+            return positions
+
+        detailed = self.get_positions_detailed()
+        held_iids = {p.instrument_id for p in detailed
+                     if p.ticker.startswith("ID:")}
+        if not held_iids:
+            return positions
+
+        logger.warning(
+            "Held positions with unresolved tickers: %s", held_iids,
+        )
+        return positions
 
     def _ticker_for_instrument(self, instrument_id: int) -> str:
         if instrument_id in self._reverse_instrument_cache:

@@ -490,29 +490,9 @@ def trade(
         raise typer.Exit(1)
 
     pipeline_config = PipelineConfig.from_yaml(config)
-    # Screen with extra rows so we capture scores for held positions that hold
-    # bonus may pull into picks. Take top N for actual picks.
     screen_top_n = max(50, pipeline_config.top_n * 5)
     pipeline = _build_pipeline(pipeline_config, settings, top_n=screen_top_n)
 
-    provider, cache = _make_provider(settings)
-    tickers = provider.get_universe(pipeline_config.universe)
-
-    yesterday = date.today() - timedelta(days=1)
-    prices = provider.get_prices(tickers, yesterday - timedelta(days=400), yesterday)
-    fundamentals = provider.get_fundamentals(tickers)
-    enriched = enrich_with_price_data(fundamentals, prices)
-    extended_result = pipeline.run(enriched)
-
-    if extended_result.is_empty():
-        typer.echo("No stocks passed filters")
-        raise typer.Exit(1)
-
-    result = extended_result.head(pipeline_config.top_n)
-    picks = result["ticker"].to_list()
-    typer.echo(f"Target portfolio ({len(picks)} stocks): {', '.join(picks)}")
-
-    # Connect to Alpaca
     broker = AlpacaBroker(
         settings.alpaca_api_key, settings.alpaca_secret_key,
         paper=settings.alpaca_paper,
@@ -523,12 +503,33 @@ def trade(
     typer.echo(f"Equity: ${account['equity']:,.2f}  Cash: ${account['cash']:,.2f}")
 
     current = broker.get_positions()
-    if current:
-        typer.echo(f"Current positions: {', '.join(current.keys())}")
+    hold_bonus_tickers = set(current.keys()) if current else None
+    if hold_bonus_tickers:
+        typer.echo(f"Current positions: {', '.join(sorted(hold_bonus_tickers))}")
     else:
         typer.echo("No current positions")
 
-    # Compute and display orders
+    provider, cache = _make_provider(settings)
+    tickers = provider.get_universe(pipeline_config.universe)
+
+    yesterday = date.today() - timedelta(days=1)
+    prices = provider.get_prices(tickers, yesterday - timedelta(days=400), yesterday)
+    fundamentals = provider.get_fundamentals(tickers)
+    enriched = enrich_with_price_data(fundamentals, prices)
+    extended_result = pipeline.run(
+        enriched,
+        hold_bonus_tickers=hold_bonus_tickers,
+        hold_bonus=pipeline_config.hold_bonus,
+    )
+
+    if extended_result.is_empty():
+        typer.echo("No stocks passed filters")
+        raise typer.Exit(1)
+
+    result = extended_result.head(pipeline_config.top_n)
+    picks = result["ticker"].to_list()
+    typer.echo(f"Target portfolio ({len(picks)} stocks): {', '.join(picks)}")
+
     orders = broker.compute_rebalance_orders(picks, account)
 
     if not orders:
@@ -609,6 +610,15 @@ def etoro_trade(
     screen_top_n = max(50, pipeline_config.top_n * 5)
     pipeline = _build_pipeline(pipeline_config, settings, top_n=screen_top_n)
 
+    broker = EtoroBroker(
+        settings.etoro_api_key, settings.etoro_user_key,
+        demo=settings.etoro_demo,
+    )
+    typer.echo(f"Mode: {broker.mode}")
+
+    account = broker.get_account()
+    typer.echo(f"Equity: ${account['equity']:,.2f}  Cash: ${account['cash']:,.2f}")
+
     provider, cache = _make_provider(settings)
     tickers = provider.get_universe(pipeline_config.universe)
 
@@ -616,38 +626,36 @@ def etoro_trade(
     prices = provider.get_prices(tickers, yesterday - timedelta(days=400), yesterday)
     fundamentals = provider.get_fundamentals(tickers)
     enriched = enrich_with_price_data(fundamentals, prices)
-    extended_result = pipeline.run(enriched)
 
-    if extended_result.is_empty():
+    # Quick screen to get top candidates for instrument resolution
+    initial_result = pipeline.run(enriched)
+    if initial_result.is_empty():
         typer.echo("No stocks passed filters")
         raise typer.Exit(1)
+
+    candidates = initial_result.head(pipeline_config.top_n)["ticker"].to_list()
+    current = broker.resolve_positions(candidates)
+    hold_bonus_tickers = set(current.keys()) if current else None
+    if hold_bonus_tickers:
+        typer.echo(f"Current positions: {', '.join(sorted(hold_bonus_tickers))}")
+    else:
+        typer.echo("No current positions")
+
+    extended_result = pipeline.run(
+        enriched,
+        hold_bonus_tickers=hold_bonus_tickers,
+        hold_bonus=pipeline_config.hold_bonus,
+    )
 
     result = extended_result.head(pipeline_config.top_n)
     picks = result["ticker"].to_list()
     typer.echo(f"Target portfolio ({len(picks)} stocks): {', '.join(picks)}")
 
-    broker = EtoroBroker(
-        settings.etoro_api_key, settings.etoro_user_key,
-        demo=settings.etoro_demo,
-    )
-    typer.echo(f"Mode: {broker.mode}")
-
-    # Pre-resolve instrument IDs for target tickers
     resolved = broker.resolve_instrument_ids(picks)
     unresolved = set(picks) - set(resolved.keys())
     if unresolved:
         typer.echo(f"Warning: could not resolve eToro instrument IDs for: {', '.join(unresolved)}")
         picks = [t for t in picks if t in resolved]
-
-    account = broker.get_account()
-    typer.echo(f"Equity: ${account['equity']:,.2f}  Cash: ${account['cash']:,.2f}")
-
-    # Resolve instrument IDs for current positions
-    current = broker.get_positions()
-    if current:
-        typer.echo(f"Current positions: {', '.join(current.keys())}")
-    else:
-        typer.echo("No current positions")
 
     orders = broker.compute_rebalance_orders(picks, account)
 
