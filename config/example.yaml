@@ -1,7 +1,7 @@
 universe: sp500
 top_n: 10
 rebalance_frequency: monthly
-position_stop_loss: 0.15
+position_stop_loss: 0.0
 hold_bonus: 1.0
 
 filters:

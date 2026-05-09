@@ -94,7 +94,7 @@ Strategy config lives in `config/example.yaml`:
 universe: sp500
 top_n: 10
 rebalance_frequency: monthly
-position_stop_loss: 0.15
+position_stop_loss: 0.0
 hold_bonus: 1.0
 
 filters:
@@ -122,9 +122,9 @@ Change the signals, adjust the weights, run `poetry run screener backtest` to se
 - **Plugin system** — Signals and filters auto-discovered from directories. Drop a `.py` file to add your own.
 - **DuckDB caching** — Prices cached forever (immutable), fundamentals with 7-day TTL, incremental gap-fill.
 - **Polars + Arrow** — Fast DataFrame operations with zero-copy interchange to DuckDB.
-- **Position stop-loss** — Caps individual stock losses per rebalance period.
+- **Position stop-loss** — Optional per-period stop-loss (disabled by default — intraday whipsaw hurts momentum strategies).
 - **Hold bonus** — Z-score boost for current holdings to reduce turnover and improve after-tax returns.
-- **Broker integration** — Rebalance via Alpaca or eToro with dry-run safety, stop-losses, and trade logging.
+- **Broker integration** — Rebalance via Alpaca or eToro with dry-run safety and trade logging.
 - **Mock data provider** — Explore the full framework without an API key.
 - **Streamlit dashboard** — Interactive UI with backtest explorer, signal deep-dive, and current screen tabs.
 

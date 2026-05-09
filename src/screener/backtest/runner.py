@@ -80,7 +80,7 @@ def run_backtest(
     Optional risk controls:
         portfolio_stop_loss: Go to cash if portfolio drops this much in a month (e.g. 0.15).
         momentum_cap: Exclude stocks with momentum_12m_return above this (e.g. 2.0).
-        position_stop_loss: Replace stocks that drop this much from entry (e.g. 0.20).
+        position_stop_loss: Exit stocks whose intra-period low breaches this level (e.g. 0.15).
         hold_bonus: Z-score bonus for current holdings to reduce turnover (e.g. 1.0).
     """
     rebalance_dates = _generate_rebalance_dates(start_date, end_date, frequency)
@@ -153,7 +153,6 @@ def run_backtest(
         # First period: buy only (no sell), so charge 1x; subsequent: buy+sell = 2x
         cost_multiplier = 1 if not prev_picks else 2
         cost = turnover * (transaction_cost_bps / 10_000) * cost_multiplier
-        prev_picks = pick_tickers
 
         # Compute equal-weight return over holding period
         period_prices = price_data.filter(
@@ -164,6 +163,7 @@ def run_backtest(
 
         if period_prices.is_empty():
             periodic_returns.append(-cost)
+            prev_picks = pick_tickers
             continue
 
         ticker_returns = (
@@ -172,24 +172,43 @@ def run_backtest(
             .agg([
                 pl.col("close").first().alias("start_price"),
                 pl.col("close").last().alias("end_price"),
+                pl.col("low").min().alias("min_price"),
             ])
             .with_columns(
                 ((pl.col("end_price") / pl.col("start_price")) - 1).alias("return")
             )
         )
 
-        # Apply position stop-loss: cap losses at the stop level
+        # Apply position stop-loss: if intra-period low breached the
+        # stop level, cap the return and mark the position as exited.
+        # Stopped positions lose hold bonus for the next period.
+        stopped_tickers: set[str] = set()
         if position_stop_loss > 0:
+            stop_threshold = 1 - position_stop_loss
             ticker_returns = ticker_returns.with_columns(
-                pl.when(pl.col("return") < -position_stop_loss)
+                (pl.col("min_price") < pl.col("start_price") * stop_threshold)
+                .alias("_stopped"),
+            )
+            stopped_tickers = set(
+                ticker_returns.filter(pl.col("_stopped"))["ticker"].to_list()
+            )
+            ticker_returns = ticker_returns.with_columns(
+                pl.when(pl.col("_stopped"))
                 .then(-position_stop_loss)
                 .otherwise(pl.col("return"))
-                .alias("return")
-            )
+                .alias("return"),
+            ).drop("_stopped")
+            total_swaps += len(stopped_tickers)
 
         avg_return = ticker_returns["return"].mean()
-        net_return = (float(avg_return) if avg_return is not None else 0.0) - cost
+        stop_cost = 0.0
+        if stopped_tickers:
+            stop_cost = len(stopped_tickers) / len(pick_tickers) * (transaction_cost_bps / 10_000)
+        net_return = (float(avg_return) if avg_return is not None else 0.0) - cost - stop_cost
         periodic_returns.append(net_return)
+
+        # Stopped positions are sold — not carried into next period
+        prev_picks = pick_tickers - stopped_tickers
 
     returns_series = pl.Series(periodic_returns)
     n_years = (end_date - start_date).days / 365.25
