@@ -121,6 +121,21 @@ class FMPProvider:
             logger.debug("financial-growth unavailable for %s", ticker)
         return []
 
+    def get_income_statement(
+        self, ticker: str, limit: int = 6, period: str = "quarter"
+    ) -> list[dict]:
+        """Fetch income statement (quarterly or annual)."""
+        try:
+            data = self._get(
+                "income-statement",
+                params={"symbol": ticker, "period": period, "limit": limit},
+            )
+            if isinstance(data, list):
+                return data
+        except (httpx.HTTPError, httpx.HTTPStatusError):
+            logger.debug("income-statement unavailable for %s", ticker)
+        return []
+
     def get_ratios(self, ticker: str, limit: int = 2) -> list[dict]:
         """Fetch financial ratios (margins, P/E, P/B, etc.). Annual only."""
         try:
@@ -182,15 +197,31 @@ class FMPProvider:
                 row["sga_to_revenue_prior"] = qkm[1].get(
                     "salesGeneralAndAdministrativeToRevenue"
                 )
-        # Growth rates (prefer quarterly)
-        q_growth = self.get_financial_growth(ticker, limit=2, period="quarter")
-        if len(q_growth) >= 2:
-            row["eps_growth_current"] = q_growth[0].get("epsgrowth")
-            row["eps_growth_prior"] = q_growth[1].get("epsgrowth")
-            row["rev_growth_current"] = q_growth[0].get("revenueGrowth")
-            row["rev_growth_prior"] = q_growth[1].get("revenueGrowth")
+        # Growth rates: YoY from quarterly income statements (Q0 vs Q4)
+        # FMP financial-growth quarterly gives QoQ — misleading for seasonal businesses
+        inc = self.get_income_statement(ticker, limit=6, period="quarter")
+        if len(inc) >= 6:
+            rev0, rev4 = inc[0].get("revenue"), inc[4].get("revenue")
+            eps0, eps4 = inc[0].get("eps"), inc[4].get("eps")
+            rev1, rev5 = inc[1].get("revenue"), inc[5].get("revenue")
+            eps1, eps5 = inc[1].get("eps"), inc[5].get("eps")
+            if rev0 and rev4:
+                row["rev_growth_current"] = rev0 / rev4 - 1
+            if eps4 and eps4 != 0:
+                row["eps_growth_current"] = eps0 / eps4 - 1
+            if rev1 and rev5:
+                row["rev_growth_prior"] = rev1 / rev5 - 1
+            if eps5 and eps5 != 0:
+                row["eps_growth_prior"] = eps1 / eps5 - 1
+        elif len(inc) >= 5:
+            rev0, rev4 = inc[0].get("revenue"), inc[4].get("revenue")
+            eps0, eps4 = inc[0].get("eps"), inc[4].get("eps")
+            if rev0 and rev4:
+                row["rev_growth_current"] = rev0 / rev4 - 1
+            if eps4 and eps4 != 0:
+                row["eps_growth_current"] = eps0 / eps4 - 1
         else:
-            # Fall back to annual growth
+            # Fall back to annual growth rates
             growth = self.get_financial_growth(ticker, limit=2, period="annual")
             if len(growth) >= 2:
                 row["eps_growth_current"] = growth[0].get("epsgrowth")
@@ -367,7 +398,7 @@ class CachedFMPProvider:
     PROFILE_TTL_HOURS = 7 * 24  # 7 days — fundamentals update quarterly
     UNIVERSE_TTL_HOURS = 30 * 24  # 30 days — S&P 500 changes ~2x/month
     # Bump this when enrich_profile_row adds new fields to invalidate stale cache
-    _CACHE_VERSION = 4
+    _CACHE_VERSION = 5
 
     def __init__(self, fmp: FMPProvider, cache: CacheManager):
         self._fmp = fmp
