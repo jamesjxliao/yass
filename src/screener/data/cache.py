@@ -215,6 +215,16 @@ class CacheManager:
             [tickers, start, end],
         )
 
+    def invalidate_prices(self, tickers: list[str]) -> int:
+        """Delete cached prices for given tickers. Returns rows deleted."""
+        if not tickers:
+            return 0
+        result = self._conn.execute(
+            "DELETE FROM price_cache WHERE ticker IN (SELECT UNNEST(?::VARCHAR[]))",
+            [tickers],
+        )
+        return result.fetchone()[0] if result.description else 0
+
     def store_sector(self, ticker: str, sector: str) -> None:
         """Store ticker→sector mapping."""
         self._conn.execute(

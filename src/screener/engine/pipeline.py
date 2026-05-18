@@ -33,7 +33,7 @@ def enrich_with_price_data(
     # ~22 trading days = 1 month, ~252 trading days = 12 months
     momentum_data = sorted_prices.group_by("ticker").agg(
         pl.col("close").tail(22).first().alias("price_1m_ago"),
-        pl.col("close").head(1).first().alias("price_12m_ago"),
+        pl.col("close").tail(252).first().alias("price_12m_ago"),
         pl.col("close").len().alias("n_days"),
     )
     momentum_data = momentum_data.with_columns(

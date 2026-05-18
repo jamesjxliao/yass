@@ -93,6 +93,53 @@ def test_prices_multiple_tickers():
     cache.close()
 
 
+def test_invalidate_prices():
+    cache = CacheManager(":memory:")
+    df = _make_price_df("AAPL", date(2024, 1, 2), 10)
+    cache.store_prices(df, source="test")
+    assert len(cache.get_prices(["AAPL"], "2024-01-01", "2024-01-31")) > 0
+
+    cache.invalidate_prices(["AAPL"])
+    assert len(cache.get_prices(["AAPL"], "2024-01-01", "2024-01-31")) == 0
+    assert cache.get_cached_price_range("AAPL") is None
+    cache.close()
+
+
+def test_detect_splits():
+    from screener.data.fmp import CachedFMPProvider
+
+    normal = pl.DataFrame({
+        "ticker": ["AAPL"] * 5,
+        "date": [date(2024, 1, i) for i in range(1, 6)],
+        "close": [100.0, 101.0, 99.5, 102.0, 100.5],
+    })
+    assert CachedFMPProvider._detect_splits(normal) == []
+
+    # Forward split: price drops by half
+    split = pl.DataFrame({
+        "ticker": ["BKNG"] * 5,
+        "date": [date(2024, 6, i) for i in range(24, 29)],
+        "close": [5500.0, 5520.0, 5480.0, 110.0, 112.0],
+    })
+    assert CachedFMPProvider._detect_splits(split) == ["BKNG"]
+
+    # Reverse split: price doubles
+    reverse = pl.DataFrame({
+        "ticker": ["XYZ"] * 4,
+        "date": [date(2024, 3, i) for i in range(1, 5)],
+        "close": [5.0, 5.1, 15.0, 15.2],
+    })
+    assert CachedFMPProvider._detect_splits(reverse) == ["XYZ"]
+
+    # Mixed: one split, one normal
+    mixed = pl.concat([normal, split])
+    result = sorted(CachedFMPProvider._detect_splits(mixed))
+    assert result == ["BKNG"]
+
+    # Empty
+    assert CachedFMPProvider._detect_splits(pl.DataFrame()) == []
+
+
 def test_get_or_fetch_if_cached():
     cache = CacheManager(":memory:")
 

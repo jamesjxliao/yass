@@ -467,7 +467,36 @@ class CachedFMPProvider:
         else:
             logger.info("Prices: all %d tickers fully cached", len(tickers))
 
-        return self._cache.get_prices(tickers, str(start), str(end))
+        result = self._cache.get_prices(tickers, str(start), str(end))
+
+        split_tickers = self._detect_splits(result)
+        if split_tickers:
+            logger.info(
+                "Split detected for %s — re-fetching adjusted prices",
+                ", ".join(split_tickers),
+            )
+            self._cache.invalidate_prices(split_tickers)
+            for ticker in split_tickers:
+                df = self._fmp.get_prices_single(ticker, start, end)
+                if not df.is_empty():
+                    self._cache.store_prices(df, source="fmp")
+            result = self._cache.get_prices(tickers, str(start), str(end))
+
+        return result
+
+    @staticmethod
+    def _detect_splits(prices: pl.DataFrame) -> list[str]:
+        """Return tickers with day-over-day close changes > 40%, indicating stale split data."""
+        if prices.is_empty():
+            return []
+        sorted_p = prices.sort(["ticker", "date"])
+        with_ratio = sorted_p.with_columns(
+            (pl.col("close") / pl.col("close").shift(1).over("ticker")).alias("_ratio")
+        )
+        suspect = with_ratio.filter(
+            (pl.col("_ratio") < 0.6) | (pl.col("_ratio") > 1.67)
+        )
+        return suspect["ticker"].unique().to_list()
 
     def get_universe(self, index: str) -> list[str]:
         data = self._cache.get_or_fetch(
