@@ -102,8 +102,8 @@ def screen(
     else:
         tickers = provider.get_universe(pipeline_config.universe)
         df = provider.get_fundamentals(tickers)
-        yesterday = date.today() - timedelta(days=1)
-        prices = provider.get_prices(tickers, yesterday - timedelta(days=400), yesterday)
+        today = date.today()
+        prices = provider.get_prices(tickers, today - timedelta(days=400), today)
         df = enrich_with_price_data(df, prices)
 
     result = pipeline.run(df)
@@ -512,8 +512,8 @@ def trade(
     provider, cache = _make_provider(settings)
     tickers = provider.get_universe(pipeline_config.universe)
 
-    yesterday = date.today() - timedelta(days=1)
-    prices = provider.get_prices(tickers, yesterday - timedelta(days=400), yesterday)
+    today = date.today()
+    prices = provider.get_prices(tickers, today - timedelta(days=400), today)
     fundamentals = provider.get_fundamentals(tickers)
     enriched = enrich_with_price_data(fundamentals, prices)
     extended_result = pipeline.run(
@@ -622,8 +622,8 @@ def etoro_trade(
     provider, cache = _make_provider(settings)
     tickers = provider.get_universe(pipeline_config.universe)
 
-    yesterday = date.today() - timedelta(days=1)
-    prices = provider.get_prices(tickers, yesterday - timedelta(days=400), yesterday)
+    today = date.today()
+    prices = provider.get_prices(tickers, today - timedelta(days=400), today)
     fundamentals = provider.get_fundamentals(tickers)
     enriched = enrich_with_price_data(fundamentals, prices)
 

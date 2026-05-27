@@ -133,23 +133,31 @@ class EtoroBroker:
         last_resp.raise_for_status()
         return last_resp
 
+    def _search_instruments(self, **params) -> list[dict]:
+        """Call the market-data search API and return matching items."""
+        resp = self._request_with_retry(
+            "get",
+            f"{BASE_URL}/market-data/search",
+            params=params,
+            headers=self._headers(),
+        )
+        return resp.json().get("items", [])
+
+    def _cache_instrument(self, ticker: str, instrument_id: int) -> None:
+        self._instrument_cache[ticker] = instrument_id
+        self._reverse_instrument_cache[instrument_id] = ticker
+
     def resolve_instrument_id(self, ticker: str) -> int | None:
         if ticker in self._instrument_cache:
             return self._instrument_cache[ticker]
 
-        resp = self._request_with_retry(
-            "get",
-            f"{BASE_URL}/market-data/search",
-            params={"internalSymbolFull": ticker},
-            headers=self._headers(),
-        )
-        data = resp.json()
+        items = self._search_instruments(internalSymbolFull=ticker)
 
         # Prefer US stock over crypto/other when ticker collides
         # (e.g., STX = Stacks crypto vs STX.US = Seagate stock)
         stock_match = None
         exact_match = None
-        for item in data.get("items", []):
+        for item in items:
             symbol = item.get("internalSymbolFull", "")
             if symbol == ticker:
                 exact_match = item
@@ -159,8 +167,7 @@ class EtoroBroker:
         match = stock_match or exact_match
         if match:
             iid = match["instrumentId"]
-            self._instrument_cache[ticker] = iid
-            self._reverse_instrument_cache[iid] = ticker
+            self._cache_instrument(ticker, iid)
             return iid
 
         logger.warning("Could not resolve instrument ID for %s", ticker)
@@ -178,26 +185,39 @@ class EtoroBroker:
         """Resolve instrument IDs for candidates, then return positions with tickers.
 
         Resolves candidate tickers first (populating the reverse cache),
-        then returns current positions. For any held positions not matched
-        by candidates, attempts to resolve by scanning additional tickers.
+        then fetches positions once. For any held positions not in the cache,
+        reverse-lookups the instrument ID via search API.
         """
         self.resolve_instrument_ids(candidate_tickers)
-        positions = self.get_positions()
-
-        unresolved_held = [t for t in positions if t.startswith("ID:")]
-        if not unresolved_held:
-            return positions
-
         detailed = self.get_positions_detailed()
+
         held_iids = {p.instrument_id for p in detailed
                      if p.ticker.startswith("ID:")}
-        if not held_iids:
-            return positions
+        for iid in held_iids:
+            ticker = self._resolve_instrument_to_ticker(iid)
+            if ticker:
+                logger.info("Resolved instrument %d -> %s", iid, ticker)
+            else:
+                logger.warning("Could not resolve instrument ID %d", iid)
 
-        logger.warning(
-            "Held positions with unresolved tickers: %s", held_iids,
-        )
-        return positions
+        result: dict[str, float] = {}
+        for pos in detailed:
+            ticker = self._ticker_for_instrument(pos.instrument_id)
+            result[ticker] = result.get(ticker, 0) + pos.amount + pos.pnl
+        return result
+
+    def _resolve_instrument_to_ticker(self, instrument_id: int) -> str | None:
+        """Reverse-lookup an instrument ID to a ticker symbol via search API."""
+        if instrument_id in self._reverse_instrument_cache:
+            return self._reverse_instrument_cache[instrument_id]
+        items = self._search_instruments(instrumentId=instrument_id)
+        if items:
+            symbol = items[0].get("internalSymbolFull", "")
+            ticker = symbol.removesuffix(".US") if symbol else None
+            if ticker:
+                self._cache_instrument(ticker, instrument_id)
+            return ticker
+        return None
 
     def _ticker_for_instrument(self, instrument_id: int) -> str:
         if instrument_id in self._reverse_instrument_cache:
@@ -255,9 +275,7 @@ class EtoroBroker:
         if account is None:
             account = self.get_account()
 
-        self.resolve_instrument_ids(target_tickers)
-
-        current = self.get_positions()
+        current = self.resolve_positions(target_tickers)
         portfolio_value = account["equity"]
         target_weight = 1.0 / len(target_tickers) if target_tickers else 0
         target_value = portfolio_value * target_weight
