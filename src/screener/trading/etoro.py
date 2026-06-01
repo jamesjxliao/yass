@@ -240,32 +240,32 @@ class EtoroBroker:
         portfolio = data.get("clientPortfolio", data)
         return compute_equity(portfolio)
 
-    def get_positions(self) -> dict[str, float]:
-        """Get current positions as {ticker: market_value}."""
-        resp = self._client.get(self._portfolio_url(), headers=self._headers())
+    def _get_pnl_positions(self) -> list[dict]:
+        """Fetch positions from the PnL endpoint (includes unrealizedPnL)."""
+        resp = self._client.get(self._info_url("pnl"), headers=self._headers())
         resp.raise_for_status()
         data = resp.json()
         portfolio = data.get("clientPortfolio", data)
+        return portfolio.get("positions", [])
 
+    def get_positions(self) -> dict[str, float]:
+        """Get current positions as {ticker: market_value}."""
         result: dict[str, float] = {}
-        for pos in portfolio.get("positions", []):
+        for pos in self._get_pnl_positions():
             iid = pos.get("instrumentID", pos.get("instrumentId"))
-            amount = pos.get("amount", 0)
-            pnl = pos.get("pnL", pos.get("pnl", 0))
+            upnl = pos.get("unrealizedPnL", {})
+            market_value = upnl.get("exposureInAccountCurrency", pos.get("amount", 0))
             ticker = self._ticker_for_instrument(iid)
-            result[ticker] = result.get(ticker, 0) + amount + pnl
+            result[ticker] = result.get(ticker, 0) + market_value
         return result
 
     def get_positions_detailed(self) -> list[EtoroPosition]:
-        """Get detailed position info including position IDs."""
-        resp = self._client.get(self._portfolio_url(), headers=self._headers())
-        resp.raise_for_status()
-        data = resp.json()
-        portfolio = data.get("clientPortfolio", data)
-
+        """Get detailed position info including position IDs and PnL."""
         positions = []
-        for pos in portfolio.get("positions", []):
+        for pos in self._get_pnl_positions():
             iid = pos.get("instrumentID", pos.get("instrumentId"))
+            upnl = pos.get("unrealizedPnL", {})
+            pnl = upnl.get("pnL", 0)
             positions.append(EtoroPosition(
                 position_id=pos.get("positionID", pos.get("positionId")),
                 instrument_id=iid,
@@ -273,7 +273,7 @@ class EtoroBroker:
                 amount=pos.get("amount", 0),
                 units=pos.get("units", 0),
                 open_rate=pos.get("openRate", 0),
-                pnl=pos.get("pnL", pos.get("pnl", 0)),
+                pnl=pnl,
             ))
         return positions
 
