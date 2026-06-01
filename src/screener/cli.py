@@ -66,6 +66,22 @@ def _make_pit_server(provider, cache, pipeline_config: PipelineConfig):
     return PITDataServer(provider, cache, um)
 
 
+def _fetch_live_prices(provider, tickers: list[str]) -> dict[str, float]:
+    """Get latest close price per ticker from the price cache."""
+    import polars as pl
+
+    today = date.today()
+    prices = provider.get_prices(tickers, today - timedelta(days=10), today)
+    if prices.is_empty():
+        return {}
+    latest = (
+        prices.sort("date")
+        .group_by("ticker")
+        .agg(pl.col("close").last())
+    )
+    return dict(zip(latest["ticker"].to_list(), latest["close"].to_list()))
+
+
 @app.command()
 def screen(
     config: Annotated[Path, typer.Option(help="Config YAML")] = Path("config/default.yaml"),
@@ -634,7 +650,11 @@ def etoro_trade(
         raise typer.Exit(1)
 
     candidates = initial_result.head(pipeline_config.top_n)["ticker"].to_list()
-    current = broker.resolve_positions(candidates)
+
+    # Fetch live prices for accurate market value computation
+    live_prices = _fetch_live_prices(provider, tickers)
+
+    current = broker.resolve_positions(candidates, prices=live_prices)
     hold_bonus_tickers = set(current.keys()) if current else None
     if hold_bonus_tickers:
         typer.echo(f"Current positions: {', '.join(sorted(hold_bonus_tickers))}")
@@ -657,7 +677,7 @@ def etoro_trade(
         typer.echo(f"Warning: could not resolve eToro instrument IDs for: {', '.join(unresolved)}")
         picks = [t for t in picks if t in resolved]
 
-    orders = broker.compute_rebalance_orders(picks, account)
+    orders = broker.compute_rebalance_orders(picks, account, prices=live_prices)
 
     if not orders:
         typer.echo("Portfolio already balanced — no trades needed")

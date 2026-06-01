@@ -181,12 +181,16 @@ class EtoroBroker:
                 result[ticker] = iid
         return result
 
-    def resolve_positions(self, candidate_tickers: list[str]) -> dict[str, float]:
-        """Resolve instrument IDs for candidates, then return positions with tickers.
+    def resolve_positions(
+        self, candidate_tickers: list[str],
+        prices: dict[str, float] | None = None,
+    ) -> dict[str, float]:
+        """Resolve instrument IDs for candidates, then return positions as market values.
 
-        Resolves candidate tickers first (populating the reverse cache),
-        then fetches positions once. For any held positions not in the cache,
-        reverse-lookups the instrument ID via search API.
+        Args:
+            candidate_tickers: Tickers to pre-resolve in the instrument cache.
+            prices: Optional {ticker: price} for computing market value from units.
+                    If not provided, falls back to invested amount (less accurate).
         """
         self.resolve_instrument_ids(candidate_tickers)
         detailed = self.get_positions_detailed()
@@ -203,7 +207,11 @@ class EtoroBroker:
         result: dict[str, float] = {}
         for pos in detailed:
             ticker = self._ticker_for_instrument(pos.instrument_id)
-            result[ticker] = result.get(ticker, 0) + pos.amount + pos.pnl
+            if prices and ticker in prices:
+                value = pos.units * prices[ticker]
+            else:
+                value = pos.amount + pos.pnl
+            result[ticker] = result.get(ticker, 0) + value
         return result
 
     def _resolve_instrument_to_ticker(self, instrument_id: int) -> str | None:
@@ -270,12 +278,13 @@ class EtoroBroker:
         return positions
 
     def compute_rebalance_orders(
-        self, target_tickers: list[str], account: dict | None = None
+        self, target_tickers: list[str], account: dict | None = None,
+        prices: dict[str, float] | None = None,
     ) -> list[RebalanceOrder]:
         if account is None:
             account = self.get_account()
 
-        current = self.resolve_positions(target_tickers)
+        current = self.resolve_positions(target_tickers, prices=prices)
         portfolio_value = account["equity"]
         target_weight = 1.0 / len(target_tickers) if target_tickers else 0
         target_value = portfolio_value * target_weight
