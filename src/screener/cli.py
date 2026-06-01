@@ -692,6 +692,7 @@ def etoro_trade(
         results = broker.execute_orders(
             orders, dry_run=dry_run,
             stop_loss_pct=pipeline_config.position_stop_loss,
+            prices=live_prices,
         )
 
         submitted = sum(1 for o in results if o.status == "submitted")

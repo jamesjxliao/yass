@@ -399,6 +399,7 @@ class EtoroBroker:
         orders: list[RebalanceOrder],
         dry_run: bool = False,
         stop_loss_pct: float = 0.0,
+        prices: dict[str, float] | None = None,
     ) -> list[RebalanceOrder]:
         """Execute rebalance: close sells first, then open buys."""
         sells = [o for o in orders if o.side == "sell"]
@@ -455,11 +456,12 @@ class EtoroBroker:
         # Phase 2: open buy positions
         if buys:
             account = self.get_account()
-            current = self.get_positions()
+            buy_tickers = {o.ticker for o in buys}
             sold_tickers = {o.ticker for o in sells if o.status == "submitted"}
+            all_candidates = list(buy_tickers | (set(pos_by_ticker.keys()) - sold_tickers))
+            current = self.resolve_positions(all_candidates, prices=prices)
             for t in sold_tickers:
                 current.pop(t, None)
-            buy_tickers = {o.ticker for o in buys}
             all_target = list(set(current.keys()) | buy_tickers)
             target_value = account["equity"] / len(all_target) if all_target else 0
 
