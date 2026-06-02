@@ -62,11 +62,15 @@ def compute_equity(portfolio: dict) -> dict:
         + orders_for_open_amount + orders_amount + external_costs
     )
 
-    positions_pnl = sum(
-        p.get("pnL", p.get("pnl", 0)) for p in positions
-    )
+    def _extract_pnl(p: dict) -> float:
+        upnl = p.get("unrealizedPnL")
+        if isinstance(upnl, dict):
+            return upnl.get("pnL", 0)
+        return p.get("pnL", p.get("pnl", 0))
+
+    positions_pnl = sum(_extract_pnl(p) for p in positions)
     mirrors_pnl = sum(
-        p.get("pnL", p.get("pnl", 0))
+        _extract_pnl(p)
         for m in mirrors for p in m.get("positions", [])
     )
     closed_profit = sum(
