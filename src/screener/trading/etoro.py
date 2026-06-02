@@ -181,17 +181,8 @@ class EtoroBroker:
                 result[ticker] = iid
         return result
 
-    def resolve_positions(
-        self, candidate_tickers: list[str],
-        prices: dict[str, float] | None = None,
-    ) -> dict[str, float]:
-        """Resolve instrument IDs for candidates, then return positions as market values.
-
-        Args:
-            candidate_tickers: Tickers to pre-resolve in the instrument cache.
-            prices: Optional {ticker: price} for computing market value from units.
-                    If not provided, falls back to invested amount (less accurate).
-        """
+    def resolve_positions(self, candidate_tickers: list[str]) -> dict[str, float]:
+        """Resolve instrument IDs for candidates, then return positions as market values."""
         self.resolve_instrument_ids(candidate_tickers)
         detailed = self.get_positions_detailed()
 
@@ -207,11 +198,7 @@ class EtoroBroker:
         result: dict[str, float] = {}
         for pos in detailed:
             ticker = self._ticker_for_instrument(pos.instrument_id)
-            if prices and ticker in prices:
-                value = pos.units * prices[ticker]
-            else:
-                value = pos.amount + pos.pnl
-            result[ticker] = result.get(ticker, 0) + value
+            result[ticker] = result.get(ticker, 0) + pos.amount + pos.pnl
         return result
 
     def _resolve_instrument_to_ticker(self, instrument_id: int) -> str | None:
@@ -279,12 +266,11 @@ class EtoroBroker:
 
     def compute_rebalance_orders(
         self, target_tickers: list[str], account: dict | None = None,
-        prices: dict[str, float] | None = None,
     ) -> list[RebalanceOrder]:
         if account is None:
             account = self.get_account()
 
-        current = self.resolve_positions(target_tickers, prices=prices)
+        current = self.resolve_positions(target_tickers)
         portfolio_value = account["equity"]
         target_weight = 1.0 / len(target_tickers) if target_tickers else 0
         target_value = portfolio_value * target_weight
@@ -431,7 +417,6 @@ class EtoroBroker:
         orders: list[RebalanceOrder],
         dry_run: bool = False,
         stop_loss_pct: float = 0.0,
-        prices: dict[str, float] | None = None,
     ) -> list[RebalanceOrder]:
         """Execute rebalance: close sells first, then open buys."""
         sells = [o for o in orders if o.side == "sell"]
@@ -494,7 +479,7 @@ class EtoroBroker:
             buy_tickers = {o.ticker for o in buys}
             sold_tickers = {o.ticker for o in sells if o.status == "submitted"}
             all_candidates = list(buy_tickers | (set(pos_by_ticker.keys()) - sold_tickers))
-            current = self.resolve_positions(all_candidates, prices=prices)
+            current = self.resolve_positions(all_candidates)
             for t in sold_tickers:
                 current.pop(t, None)
             all_target = list(set(current.keys()) | buy_tickers)
