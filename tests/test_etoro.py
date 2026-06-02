@@ -135,6 +135,122 @@ def test_equity_camelcase_field_variants():
     assert result["equity"] == 4055
 
 
+def test_equity_nested_unrealized_pnl():
+    """PnL endpoint nests PnL inside unrealizedPnL dict."""
+    portfolio = {
+        "credit": 500,
+        "positions": [
+            {"amount": 1000, "unrealizedPnL": {"pnL": 200}},
+            {"amount": 2000, "unrealizedPnL": {"pnL": -50}},
+        ],
+        "mirrors": [],
+        "ordersForOpen": [],
+        "orders": [],
+    }
+    result = compute_equity(portfolio)
+
+    # Unrealized PnL = 200 + (-50) = 150
+    # Equity = 500 + 3000 + 150 = 3650
+    assert result["equity"] == 3650
+    assert result["portfolio_value"] == 3150
+
+
+def test_equity_mixed_pnl_formats():
+    """Some positions have nested unrealizedPnL, some have top-level pnL."""
+    portfolio = {
+        "credit": 1000,
+        "positions": [
+            {"amount": 500, "unrealizedPnL": {"pnL": 100}},
+            {"amount": 500, "pnL": 50},
+        ],
+        "mirrors": [],
+        "ordersForOpen": [],
+        "orders": [],
+    }
+    result = compute_equity(portfolio)
+
+    # PnL = 100 + 50 = 150
+    assert result["equity"] == 2150
+
+
+def test_equity_no_pnl_field():
+    """Position with neither unrealizedPnL nor pnL defaults to 0."""
+    portfolio = {
+        "credit": 1000,
+        "positions": [{"amount": 500}],
+        "mirrors": [],
+        "ordersForOpen": [],
+        "orders": [],
+    }
+    result = compute_equity(portfolio)
+    assert result["equity"] == 1500
+
+
+class TestExecuteTrim:
+    """Partial close trims overweight positions by the right number of units."""
+
+    def _make_broker(self):
+        broker = EtoroBroker(api_key="k", user_key="u", demo=True)
+        broker._close_position = MagicMock(return_value={"orderForClose": {}})
+        return broker
+
+    def test_trim_deducts_correct_units(self):
+        from screener.trading.broker import RebalanceOrder
+        from screener.trading.etoro import EtoroPosition
+
+        broker = self._make_broker()
+        order = RebalanceOrder(ticker="MU", side="sell", notional=500, trim=True)
+        positions = [
+            EtoroPosition(position_id=1, instrument_id=1130, ticker="MU",
+                         amount=2000, units=10.0, open_rate=200.0, pnl=500),
+        ]
+
+        broker._execute_trim(order, positions)
+
+        broker._close_position.assert_called_once()
+        call_args = broker._close_position.call_args
+        assert call_args[0][0] == 1  # position_id
+        assert call_args[0][1] == 1130  # instrument_id
+        # $500 / ($2500 / 10 units) = 2.0 units
+        assert abs(call_args[1]["units_to_deduct"] - 2.0) < 0.01
+
+    def test_trim_caps_at_position_units(self):
+        from screener.trading.broker import RebalanceOrder
+        from screener.trading.etoro import EtoroPosition
+
+        broker = self._make_broker()
+        order = RebalanceOrder(ticker="MU", side="sell", notional=10000, trim=True)
+        positions = [
+            EtoroPosition(position_id=1, instrument_id=1130, ticker="MU",
+                         amount=1000, units=5.0, open_rate=200.0, pnl=0),
+        ]
+
+        broker._execute_trim(order, positions)
+
+        call_args = broker._close_position.call_args
+        # Can't sell more than 5 * 0.999 = 4.995 units
+        assert call_args[1]["units_to_deduct"] <= 5.0
+
+    def test_trim_spreads_across_positions(self):
+        from screener.trading.broker import RebalanceOrder
+        from screener.trading.etoro import EtoroPosition
+
+        broker = self._make_broker()
+        order = RebalanceOrder(ticker="MU", side="sell", notional=600, trim=True)
+        positions = [
+            EtoroPosition(position_id=1, instrument_id=1130, ticker="MU",
+                         amount=500, units=2.5, open_rate=200.0, pnl=0),
+            EtoroPosition(position_id=2, instrument_id=1130, ticker="MU",
+                         amount=500, units=2.5, open_rate=200.0, pnl=0),
+        ]
+
+        broker._execute_trim(order, positions)
+
+        # $600 / ($1000 / 5 units) = 3.0 units total
+        # Should deduct from largest first (both equal at 2.5)
+        assert broker._close_position.call_count == 2
+
+
 class TestExecuteOrdersStopLoss:
     """Stop-loss must be set on every buy or the buy is skipped."""
 
