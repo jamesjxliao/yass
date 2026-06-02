@@ -303,7 +303,7 @@ class EtoroBroker:
             diff = current[ticker] - target_value
             if diff > target_value * 0.05:
                 orders.append(RebalanceOrder(
-                    ticker=ticker, side="sell", notional=diff,
+                    ticker=ticker, side="sell", notional=diff, trim=True,
                 ))
 
         for ticker in target_set:
@@ -339,14 +339,46 @@ class EtoroBroker:
         resp.raise_for_status()
         return resp.json()
 
-    def _close_position(self, position_id: int, instrument_id: int) -> dict:
+    def _close_position(
+        self, position_id: int, instrument_id: int,
+        units_to_deduct: float | None = None,
+    ) -> dict:
+        body: dict = {"InstrumentId": instrument_id}
+        if units_to_deduct is not None:
+            body["UnitsToDeduct"] = round(units_to_deduct, 5)
         resp = self._client.post(
             self._execution_url(f"market-close-orders/positions/{position_id}"),
-            json={"InstrumentId": instrument_id},
+            json=body,
             headers=self._headers(),
         )
         resp.raise_for_status()
         return resp.json()
+
+    def _execute_trim(
+        self, order: RebalanceOrder, positions: list[EtoroPosition],
+    ) -> None:
+        """Partially close positions to reduce a holding by order.notional dollars."""
+        total_value = sum(p.amount + p.pnl for p in positions)
+        total_units = sum(p.units for p in positions)
+        if total_value <= 0 or total_units <= 0:
+            raise ValueError(f"No value to trim for {order.ticker}")
+        price_per_unit = total_value / total_units
+        units_to_sell = order.notional / price_per_unit
+
+        sorted_positions = sorted(positions, key=lambda p: p.units, reverse=True)
+        remaining = units_to_sell
+        for pos in sorted_positions:
+            if remaining <= 0:
+                break
+            deduct = min(remaining, pos.units * 0.999)
+            if deduct < 0.001:
+                continue
+            self._close_position(pos.position_id, pos.instrument_id, units_to_deduct=deduct)
+            remaining -= deduct
+            logger.info(
+                "TRIM %s pos=%d: %.5f units ($%.2f)",
+                order.ticker, pos.position_id, deduct, deduct * price_per_unit,
+            )
 
     def _cancel_open_order(self, order_id: int) -> dict:
         resp = self._client.delete(
@@ -434,8 +466,11 @@ class EtoroBroker:
                 logger.error("SELL %s — no position found", order.ticker)
                 continue
             try:
-                for pos in positions_to_close:
-                    self._close_position(pos.position_id, pos.instrument_id)
+                if order.trim:
+                    self._execute_trim(order, positions_to_close)
+                else:
+                    for pos in positions_to_close:
+                        self._close_position(pos.position_id, pos.instrument_id)
                 order.status = "submitted"
                 logger.info("SELL %s $%.2f — submitted", order.ticker, order.notional)
             except Exception as e:

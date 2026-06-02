@@ -16,6 +16,7 @@ class RebalanceOrder:
     side: str  # "buy" or "sell"
     notional: float  # dollar amount
     status: str = "pending"
+    trim: bool = False  # True = partial sell (reduce to target), False = full exit
 
 
 class AlpacaBroker:
