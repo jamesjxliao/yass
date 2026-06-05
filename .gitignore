@@ -15,6 +15,7 @@ data/*.duckdb.wal
 data/*.json
 data/*.png
 data/*.txt
+!data/sp400/
 
 # Results
 results/

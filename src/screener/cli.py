@@ -213,6 +213,7 @@ def run_research(
 
 @app.command("fetch-history")
 def fetch_history(
+    universe: Annotated[str, typer.Option(help="Universe to fetch (sp500, sp400)")] = "sp500",
     years: Annotated[int, typer.Option(help="Years of history to fetch")] = 10,
     verbose: Annotated[bool, typer.Option("--verbose")] = False,
 ) -> None:
@@ -228,7 +229,27 @@ def fetch_history(
         typer.echo("fetch-history requires FMP provider. Set FMP_API_KEY in .env")
         raise typer.Exit(1)
 
-    tickers = provider.get_universe("sp500")
+    # Load PIT membership history for sp400
+    if universe == "sp400":
+        import json as _json
+        from pathlib import Path
+
+        from screener.data.universe import UniverseManager
+
+        history_path = Path("data/sp400/membership_history.json")
+        if history_path.exists():
+            um = UniverseManager(cache)
+            with open(history_path) as f:
+                records = _json.load(f)
+            um.bulk_load_history("sp400", records)
+            typer.echo(f"Loaded {len(records)} sp400 membership records")
+        else:
+            typer.echo(
+                "Warning: data/sp400/membership_history.json not found."
+                " Run scripts/build_sp400_universe.py first."
+            )
+
+    tickers = provider.get_universe(universe)
     typer.echo(f"Fetching {years}yr history for {len(tickers)} tickers...")
 
     # Fetch historical data (parallel) then write PIT snapshots (bulk)

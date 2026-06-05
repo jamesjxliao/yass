@@ -1,0 +1,24 @@
+universe: sp400
+top_n: 5
+rebalance_frequency: monthly
+position_stop_loss: 0.0
+hold_bonus: 1.0
+
+filters:
+  - name: market_cap_filter
+    params:
+      min_cap: 500_000_000
+
+  - name: volume_filter
+    params:
+      min_avg_volume: 200_000
+
+signals:
+  - name: quality_at_discount_midcap
+    weight: 0.50
+
+  - name: margin_expansion
+    weight: 0.25
+
+  - name: quality_midcap
+    weight: 0.25

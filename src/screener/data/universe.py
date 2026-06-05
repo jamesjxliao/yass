@@ -81,3 +81,43 @@ class UniverseManager:
         if result.is_empty():
             return []
         return result["ticker"].to_list()
+
+    def bulk_load_history(self, index: str, records: list[dict]) -> int:
+        """Bulk-load historical membership records.
+
+        Each record has: ticker, added_date, removed_date (or None).
+        """
+        if not records:
+            return 0
+
+        import polars as pl
+
+        df = pl.DataFrame(records).with_columns(
+            pl.lit(index).alias("index_name"),
+            pl.lit(False).alias("is_delisted"),
+        )
+        for col in ["added_date", "removed_date"]:
+            if col in df.columns:
+                dtype = df[col].dtype
+                if dtype == pl.String or dtype == pl.Utf8:
+                    df = df.with_columns(
+                        pl.col(col).str.to_date("%Y-%m-%d", strict=False)
+                    )
+                elif dtype == pl.Null:
+                    df = df.with_columns(
+                        pl.lit(None).cast(pl.Date).alias(col)
+                    )
+
+        self._cache._conn.execute(
+            "DELETE FROM universe_membership WHERE index_name = ?", [index]
+        )
+        self._cache._conn.register("_membership_bulk", df.to_arrow())
+        self._cache._conn.execute(
+            """INSERT INTO universe_membership
+               (ticker, index_name, added_date, removed_date, is_delisted)
+               SELECT ticker, index_name, added_date, removed_date, is_delisted
+               FROM _membership_bulk"""
+        )
+        self._cache._conn.unregister("_membership_bulk")
+        logger.info("Bulk-loaded %d membership records for '%s'", len(records), index)
+        return len(records)

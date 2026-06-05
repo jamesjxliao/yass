@@ -303,25 +303,27 @@ class FMPProvider:
         return pl.concat(frames)
 
     def get_universe(self, index: str) -> list[str]:
-        """Get index constituents. Falls back to hardcoded list on free tier."""
+        """Get index constituents. Falls back to hardcoded list."""
         endpoint_map = {
             "sp500": "sp500-constituent",
             "nasdaq100": "nasdaq-constituent",
             "dowjones": "dowjones-constituent",
         }
-        if index not in endpoint_map:
-            raise ValueError(f"Unknown index: {index}")
-        try:
-            data = self._get(endpoint_map[index])
-            if isinstance(data, list) and data:
-                return [row["symbol"] for row in data]
-        except (httpx.HTTPError, httpx.HTTPStatusError):
-            logger.warning("Constituent endpoint restricted, using hardcoded list")
+        if index in endpoint_map:
+            try:
+                data = self._get(endpoint_map[index])
+                if isinstance(data, list) and data:
+                    return [row["symbol"] for row in data]
+            except (httpx.HTTPError, httpx.HTTPStatusError):
+                logger.warning("Constituent endpoint restricted, using hardcoded list")
 
-        # Free tier fallback
-        if index == "sp500":
-            return _SP500_TICKERS
-        raise ValueError(f"No fallback ticker list for index: {index}")
+        fallback_map = {
+            "sp500": _SP500_TICKERS,
+            "sp400": _SP400_TICKERS,
+        }
+        if index in fallback_map:
+            return fallback_map[index]
+        raise ValueError(f"Unknown index: {index}")
 
     def get_delisted(self) -> list[str]:
         try:
@@ -759,4 +761,47 @@ _SP500_TICKERS = [
     "WBD", "WDC", "WEC", "WELL", "WFC", "WHR", "WM", "WMB", "WMT", "WRB",
     "WRK", "WST", "WTW", "WY", "WYNN", "XEL", "XOM", "XRAY", "XYL", "YUM",
     "ZBH", "ZBRA", "ZION", "ZTS",
+]
+
+_SP400_TICKERS = [
+    "AA", "AAL", "AAON", "ACI", "ACM", "ADC", "AEIS", "AFG", "AGCO", "AHR",
+    "AIT", "ALGM", "ALK", "ALLY", "ALV", "AM", "AMG", "AMH", "AMKR", "AN",
+    "ANF", "APG", "APPF", "AR", "ARMK", "ARW", "ARWR", "ASB", "ASH", "ATI",
+    "ATR", "AVAV", "AVNT", "AVT", "AVTR", "AXTA", "AYI", "BAH", "BBWI", "BC",
+    "BCO", "BDC", "BHF", "BILL", "BIO", "BJ", "BKH", "BLD", "BLKB", "BMRN",
+    "BRBR", "BRKR", "BROS", "BRX", "BSY", "BURL", "BWA", "BWXT", "BYD", "CACI",
+    "CAR", "CART", "CAVA", "CBSH", "CBT", "CCK", "CDP", "CELH", "CFR", "CG",
+    "CGNX", "CHDN", "CHE", "CHH", "CHRD", "CHWY", "CLF", "CLH", "CMC", "CNH",
+    "CNM", "CNO", "CNX", "CNXC", "COKE", "COLB", "COLM", "COTY", "CPRI", "CR",
+    "CRBG", "CROX", "CRS", "CRUS", "CSL", "CTRE", "CUBE", "CUZ", "CVLT", "CW",
+    "CXT", "CYTK", "DAR", "DBX", "DCI", "DINO", "DKS", "DLB", "DOCN", "DOCS",
+    "DOCU", "DT", "DTM", "DUOL", "DY", "EEFT", "EGP", "EHC", "ELAN", "ELF",
+    "ELS", "ENS", "ENSG", "ENTG", "EPR", "EQH", "ESAB", "ESNT", "EVR", "EWBC",
+    "EXEL", "EXLS", "EXP", "EXPO", "FAF", "FBIN", "FCFS", "FCN", "FFIN", "FHI",
+    "FHN", "FIVE", "FLEX", "FLG", "FLR", "FLS", "FN", "FNB", "FND", "FNF",
+    "FOUR", "FR", "FTI", "G", "GAP", "GATX", "GBCI", "GEF", "GGG", "GHC",
+    "GLPI", "GME", "GMED", "GNTX", "GPK", "GT", "GTLS", "GWRE", "GXO", "H",
+    "HAE", "HALO", "HGV", "HIMS", "HL", "HLI", "HLNE", "HOG", "HOMB", "HQY",
+    "HR", "HRB", "HWC", "HXL", "IBOC", "IDA", "IDCC", "ILMN", "INGR", "IPGP",
+    "IRT", "ITT", "JAZZ", "JEF", "JHG", "JLL", "KBH", "KBR", "KD", "KEX",
+    "KNF", "KNSL", "KNX", "KRC", "KRG", "KTOS", "LAD", "LAMR", "LEA", "LECO",
+    "LFUS", "LIVN", "LNTH", "LOPE", "LPX", "LSCC", "LSTR", "M", "MANH", "MASI",
+    "MAT", "MEDP", "MIDD", "MKSI", "MLI", "MMS", "MOG.A", "MORN", "MP", "MSA",
+    "MSM", "MTDR", "MTG", "MTN", "MTSI", "MTZ", "MUR", "MUSA", "MZTI", "NBIX",
+    "NEU", "NFG", "NJR", "NLY", "NNN", "NOV", "NOVT", "NSA", "NTNX", "NVST",
+    "NVT", "NWE", "NXST", "NXT", "NYT", "OC", "OGE", "OGS", "OHI", "OKTA",
+    "OLED", "OLLI", "OLN", "ONB", "ONTO", "OPCH", "ORA", "ORI", "OSK", "OVV",
+    "OZK", "P", "PAG", "PATH", "PB", "PBF", "PCTY", "PEGA", "PEN", "PFGC",
+    "PII", "PINS", "PK", "PLNT", "PNFP", "POR", "POST", "PPC", "PR", "PRI",
+    "PSN", "PVH", "QLYS", "R", "RBA", "RBC", "REXR", "RGA", "RGEN", "RGLD",
+    "RH", "RLI", "RMBS", "RNR", "ROIV", "RPM", "RRC", "RRX", "RS", "RYAN",
+    "RYN", "SAIA", "SAIC", "SAM", "SARO", "SBRA", "SCI", "SEIC", "SF", "SFM",
+    "SGI", "SHC", "SIGI", "SITM", "SLAB", "SLGN", "SLM", "SMG", "SN", "SNX",
+    "SOLS", "SON", "SPXC", "SR", "SSB", "SSD", "ST", "STAG", "STRL", "STWD",
+    "SWX", "SYNA", "TCBI", "TEX", "THC", "THG", "THO", "TKR", "TLN", "TMHC",
+    "TNL", "TOL", "TREX", "TRU", "TTC", "TTEK", "TTMI", "TWLO", "TXNM", "TXRH",
+    "UBSI", "UFPI", "UGI", "ULS", "UMBF", "UNM", "USFD", "UTHR", "VAL", "VC",
+    "VFC", "VICR", "VLY", "VMI", "VNO", "VNOM", "VNT", "VOYA", "VVV", "WAL",
+    "WBS", "WCC", "WEX", "WFRD", "WH", "WHR", "WING", "WLK", "WMG", "WMS",
+    "WPC", "WSO", "WTFC", "WTRG", "WTS", "WWD", "XPO", "XRAY", "YETI", "ZION",
 ]
