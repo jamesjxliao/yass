@@ -98,11 +98,29 @@ class AlpacaBroker:
         return orders
 
     def cancel_open_orders(self) -> int:
-        """Cancel all open orders. Returns number cancelled."""
+        """Cancel all open orders and wait for holds to clear."""
+        import time
+
+        from alpaca.trading.enums import QueryOrderStatus
+        from alpaca.trading.requests import GetOrdersRequest
+
         cancelled = self._client.cancel_orders()
         count = len(cancelled) if cancelled else 0
-        if count:
-            logger.info("Cancelled %d open orders", count)
+        if not count:
+            return 0
+
+        logger.info("Cancelled %d open orders, waiting for holds to clear...", count)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            time.sleep(2)
+            remaining = self._client.get_orders(
+                filter=GetOrdersRequest(status=QueryOrderStatus.OPEN)
+            )
+            if not remaining:
+                break
+        else:
+            logger.warning("Timed out waiting for cancellations to clear")
+
         return count
 
     def _get_last_price(self, ticker: str) -> float | None:
