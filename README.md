@@ -76,15 +76,18 @@ The repo ships with 9 signals — use them as-is or adjust weights in `config/ex
 
 | Signal | What It Captures |
 |---|---|
+| `piotroski_f` | Financial strength checklist (profitability, leverage, efficiency) |
+| `momentum` | 12-month price momentum |
+| `low_leverage_growth` | Growth funded by cash flow, not debt |
+| `quality_score` | Composite quality: ROE, ROIC, ROA, R&D efficiency, low debt |
 | `quality_momentum` | Momentum weighted by ROE + ROIC quality |
 | `margin_expansion` | Gross + operating margin improvement YoY |
-| `quality_score` | Composite quality: ROE, ROIC, ROA, R&D efficiency, low debt |
-| `low_leverage_growth` | Growth funded by cash flow, not debt |
 | `efficiency_acceleration` | Revenue/EPS growth acceleration + SGA leverage |
 | `value_composite` | Multi-factor value: earnings yield, FCF yield, EV/sales |
-| `momentum` | 12-month price momentum |
 | `earnings_growth` | Earnings growth rate |
-| `piotroski_f_score` | Classic Piotroski F-Score |
+| `analyst_momentum` | Rising analyst buy consensus |
+| `earnings_surprise` | Post-earnings drift from standardized earnings surprise |
+| `quality_at_discount` | Beaten-down quality stocks with FCF + low debt |
 
 ## Configuration
 
@@ -103,14 +106,14 @@ filters:
       min_cap: 1_000_000_000
 
 signals:
-  - name: quality_momentum
-    weight: 0.25
-  - name: value_composite
+  - name: piotroski_f
+    weight: 0.30
+  - name: momentum
     weight: 0.25
   - name: quality_score
     weight: 0.25
-  - name: momentum
-    weight: 0.25
+  - name: low_leverage_growth
+    weight: 0.20
 ```
 
 Change the signals, adjust the weights, run `poetry run screener backtest` to see the results.
@@ -174,7 +177,7 @@ Add it to your config and backtest. No core code changes needed.
 │   ├── engine/           # Pipeline, ranking, output
 │   ├── backtest/         # Runner, walk-forward, metrics
 │   ├── evaluation/       # Monte Carlo, factor attribution, charts
-│   ├── trading/          # Broker integrations (Alpaca, eToro)
+│   ├── trading/          # Broker integrations (Alpaca, eToro, Robinhood)
 │   └── plugins/          # Plugin discovery and registry
 ├── tests/                # Test suite
 └── app.py                # Streamlit dashboard

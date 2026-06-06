@@ -14,14 +14,14 @@ filters:
       min_avg_volume: 500_000
 
 signals:
-  - name: quality_score
-    weight: 0.30
-
-  - name: quality_momentum
-    weight: 0.20
-
-  - name: value_composite
+  - name: piotroski_f
     weight: 0.30
 
   - name: momentum
+    weight: 0.25
+
+  - name: quality_score
+    weight: 0.25
+
+  - name: low_leverage_growth
     weight: 0.20
