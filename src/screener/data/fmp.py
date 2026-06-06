@@ -148,6 +148,29 @@ class FMPProvider:
             logger.debug("ratios unavailable for %s", ticker)
         return []
 
+    def get_grades_historical(self, ticker: str, limit: int = 8) -> list[dict]:
+        """Fetch monthly analyst grade history (buy/hold/sell counts)."""
+        try:
+            data = self._get(
+                "grades-historical",
+                params={"symbol": ticker, "limit": limit},
+            )
+            if isinstance(data, list):
+                return data
+        except (httpx.HTTPError, httpx.HTTPStatusError):
+            logger.debug("grades-historical unavailable for %s", ticker)
+        return []
+
+    def get_financial_scores(self, ticker: str) -> dict | None:
+        """Fetch Piotroski score and Altman Z-Score (current snapshot)."""
+        try:
+            data = self._get("financial-scores", params={"symbol": ticker})
+            if isinstance(data, list) and data:
+                return data[0]
+        except (httpx.HTTPError, httpx.HTTPStatusError):
+            logger.debug("financial-scores unavailable for %s", ticker)
+        return None
+
     def get_quarterly_key_metrics(self, ticker: str, limit: int = 2) -> list[dict]:
         """Fetch quarterly key-metrics (Premium plan)."""
         try:
