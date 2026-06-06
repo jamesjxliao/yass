@@ -27,8 +27,10 @@ def load_filters(
         params = entry.get("params", {})
 
         if name not in registry:
-            logger.warning("Filter '%s' not found in %s, skipping", name, filters_dir)
-            continue
+            raise ValueError(
+                f"Filter '{name}' not found in {filters_dir}. "
+                f"Available filters: {sorted(registry)}"
+            )
 
         plugin = registry[name]
 
@@ -65,8 +67,10 @@ def load_signals(
         weight = entry.get("weight", 1.0)
 
         if name not in registry:
-            logger.warning("Signal '%s' not found in %s, skipping", name, signals_dir)
-            continue
+            raise ValueError(
+                f"Signal '{name}' not found in {signals_dir}. "
+                f"Available signals: {sorted(registry)}"
+            )
 
         loaded.append((registry[name], weight))
 

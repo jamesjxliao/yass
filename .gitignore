@@ -21,7 +21,7 @@ data/*.txt
 results/
 
 # Autoresearch
-run.log
+*.log
 
 # IDE
 .idea/

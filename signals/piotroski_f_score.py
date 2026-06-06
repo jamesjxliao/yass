@@ -4,23 +4,21 @@ import polars as pl
 
 
 class PiotroskiFScoreSignal:
-    """Simplified Piotroski F-Score.
+    """8-point Piotroski F-Score adapted to available FMP data.
 
-    Classic 9-point checklist for financial strength, adapted to
-    available FMP data. Scores 0-1 based on how many criteria pass:
-
-    Profitability (from key-metrics):
-    1. ROA > 0 (profitable)
+    Profitability:
+    1. ROA > 0
     2. ROIC > ROA (leverage working for shareholders)
-    3. FCF yield > 0 (generating real cash)
+    3. FCF yield > 0
     4. Earnings yield > 0
 
-    Leverage (from key-metrics):
-    5. Current ratio > 1 (can pay short-term debts)
-    6. Net debt/EBITDA < 2 (not over-leveraged)
+    Leverage:
+    5. Current ratio > 1
+    6. Net debt/EBITDA < 2
 
     Efficiency:
-    7. ROE > sector median (above-average profitability)
+    7. ROE > cross-sectional median
+    8. Gross margin improving YoY
     """
 
     name = "piotroski_f"
@@ -67,6 +65,12 @@ class PiotroskiFScoreSignal:
             if median_roe is not None:
                 score = score + (roe > median_roe).cast(pl.Float64)
 
+        # 8. Improving gross margin (original Piotroski criterion)
+        if "gross_margin_current" in df.columns and "gross_margin_prior" in df.columns:
+            gm_curr = df["gross_margin_current"].cast(pl.Float64).fill_null(0.0)
+            gm_prior = df["gross_margin_prior"].cast(pl.Float64).fill_null(0.0)
+            score = score + (gm_curr > gm_prior).cast(pl.Float64)
+
         # Normalize to 0-1 range
-        max_possible = 7.0
+        max_possible = 8.0
         return score / max_possible

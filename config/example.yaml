@@ -17,7 +17,7 @@ signals:
   - name: piotroski_f
     weight: 0.30
 
-  - name: momentum
+  - name: momentum_12m
     weight: 0.25
 
   - name: quality_score

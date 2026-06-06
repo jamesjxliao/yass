@@ -77,7 +77,7 @@ The repo ships with 9 signals — use them as-is or adjust weights in `config/ex
 | Signal | What It Captures |
 |---|---|
 | `piotroski_f` | Financial strength checklist (profitability, leverage, efficiency) |
-| `momentum` | 12-month price momentum |
+| `momentum_12m` | 12-month price momentum |
 | `low_leverage_growth` | Growth funded by cash flow, not debt |
 | `quality_score` | Composite quality: ROE, ROIC, ROA, R&D efficiency, low debt |
 | `quality_momentum` | Momentum weighted by ROE + ROIC quality |
@@ -108,13 +108,15 @@ filters:
 signals:
   - name: piotroski_f
     weight: 0.30
-  - name: momentum
+  - name: momentum_12m
     weight: 0.25
   - name: quality_score
     weight: 0.25
   - name: low_leverage_growth
     weight: 0.20
 ```
+
+Signal names must match the `name` attribute on the signal class (e.g. `momentum_12m`, not `momentum`); the loader raises if a name isn't found.
 
 Change the signals, adjust the weights, run `poetry run screener backtest` to see the results.
 
