@@ -25,6 +25,9 @@ pyarrow = ">=15.0"
 matplotlib = "^3.8"
 streamlit = "^1.55.0"
 alpaca-py = "^0.43.2"
+numpy = "^2.0"
+scipy = "^1.13"
+scikit-learn = "^1.5"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"
@@ -47,9 +50,6 @@ select = ["E", "F", "I", "N", "W"]
 "src/screener/evaluation/report.py" = ["N803", "N806"]
 "tests/test_evaluation.py" = ["N806"]
 # ML/math conventions (X, y, T) and verbose log/print lines in the research model
-"src/screener/models/index_hedge.py" = ["N803", "N806", "E501"]
-"scripts/run_hedge.py" = ["E402", "E501", "N803", "N806"]
-"scripts/run_hedge_frontier.py" = ["E402", "E501", "N806"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
