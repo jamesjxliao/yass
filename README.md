@@ -144,7 +144,7 @@ Fields available for building signals:
 | **Growth** | `rev_growth_current`, `rev_growth_prior`, `eps_growth_current`, `eps_growth_prior` |
 | **Margins** | `gross_margin_current`, `gross_margin_prior`, `op_margin_current`, `op_margin_prior` |
 | **Efficiency** | `sga_to_revenue`, `rd_to_revenue`, `sbc_to_revenue`, `capex_to_revenue`, `cash_conversion_cycle` |
-| **Price** | `momentum_12m_return`, `sma_200`, `avg_volume_20d`, `beta` |
+| **Price** | `momentum_12m_return`, `sma_200`, `realized_vol_20d`, `avg_volume_20d`, `beta` |
 | **Other** | `analyst_target`, `insider_buy_ratio`, `intangibles_to_assets`, `sector` |
 
 ## Writing a Custom Signal
