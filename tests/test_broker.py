@@ -142,3 +142,34 @@ def test_stops_not_placed_on_dry_run():
 
     client.submit_order.assert_not_called()
     client.get_all_positions.assert_not_called()
+
+
+def test_trim_sell_uses_notional_not_close_position():
+    """Trim sells (overweight reduction) must use notional order, not close_position."""
+    client = MagicMock()
+    client.cancel_orders.return_value = []
+    client.get_orders.return_value = []
+    # After sells: 3 positions (APP, INCY, HELD) at $100k equity
+    client.get_account.return_value = _mock_account(equity=100000, cash=5000)
+    client.get_all_positions.return_value = [
+        _mock_position("APP", 100, 45000, 450),
+        _mock_position("INCY", 50, 40000, 800),
+        _mock_position("HELD", 30, 10000, 333),
+    ]
+
+    broker = _make_broker(client)
+    orders = [
+        RebalanceOrder(ticker="APP", side="sell", notional=12000, trim=True),
+        RebalanceOrder(ticker="INCY", side="sell", notional=7000, trim=True),
+    ]
+
+    broker.execute_orders(orders, dry_run=False)
+
+    # Trims must NOT call close_position (that liquidates the entire holding)
+    client.close_position.assert_not_called()
+    # Trims use submit_order with notional amount
+    assert client.submit_order.call_count == 2
+    for call in client.submit_order.call_args_list:
+        req = call[0][0]
+        assert req.side.value == "sell"
+        assert req.notional is not None

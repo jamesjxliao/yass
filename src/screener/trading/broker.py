@@ -19,6 +19,50 @@ class RebalanceOrder:
     trim: bool = False  # True = partial sell (reduce to target), False = full exit
 
 
+TOLERANCE = 0.05
+
+
+def compute_rebalance_orders(
+    target_tickers: list[str],
+    equity: float,
+    current: dict[str, float],
+) -> list[RebalanceOrder]:
+    """Compute equal-weight rebalance orders with 5% tolerance band.
+
+    Shared across all brokers. Broker-specific methods fetch equity/positions
+    and delegate here.
+    """
+    target_weight = 1.0 / len(target_tickers) if target_tickers else 0
+    target_value = equity * target_weight
+
+    target_set = set(target_tickers)
+    current_set = set(current.keys())
+
+    orders: list[RebalanceOrder] = []
+
+    for ticker in current_set - target_set:
+        orders.append(RebalanceOrder(
+            ticker=ticker, side="sell", notional=current[ticker],
+        ))
+
+    for ticker in current_set & target_set:
+        diff = current[ticker] - target_value
+        if diff > target_value * TOLERANCE:
+            orders.append(RebalanceOrder(
+                ticker=ticker, side="sell", notional=diff, trim=True,
+            ))
+
+    for ticker in target_set:
+        current_value = current.get(ticker, 0)
+        diff = target_value - current_value
+        if diff > target_value * TOLERANCE:
+            orders.append(RebalanceOrder(
+                ticker=ticker, side="buy", notional=diff,
+            ))
+
+    return orders
+
+
 class AlpacaBroker:
     """Alpaca trading client for paper and live trading."""
 
@@ -54,48 +98,10 @@ class AlpacaBroker:
     def compute_rebalance_orders(
         self, target_tickers: list[str], account: dict | None = None
     ) -> list[RebalanceOrder]:
-        """Compute orders needed to rebalance to equal-weight target portfolio.
-
-        Returns list of sell orders first, then buy orders.
-        """
         if account is None:
             account = self.get_account()
-
         current = self.get_positions()
-        portfolio_value = account["equity"]
-        target_weight = 1.0 / len(target_tickers) if target_tickers else 0
-        target_value = portfolio_value * target_weight
-
-        target_set = set(target_tickers)
-        current_set = set(current.keys())
-
-        orders = []
-
-        # Sell positions not in target
-        for ticker in current_set - target_set:
-            orders.append(RebalanceOrder(
-                ticker=ticker, side="sell",
-                notional=current[ticker],
-            ))
-
-        # Sell excess from overweight positions
-        for ticker in current_set & target_set:
-            diff = current[ticker] - target_value
-            if diff > target_value * 0.05:  # only if >5% overweight
-                orders.append(RebalanceOrder(
-                    ticker=ticker, side="sell", notional=diff,
-                ))
-
-        # Buy new positions and underweight positions
-        for ticker in target_set:
-            current_value = current.get(ticker, 0)
-            diff = target_value - current_value
-            if diff > target_value * 0.05:  # only if >5% underweight
-                orders.append(RebalanceOrder(
-                    ticker=ticker, side="buy", notional=diff,
-                ))
-
-        return orders
+        return compute_rebalance_orders(target_tickers, account["equity"], current)
 
     def cancel_open_orders(self) -> int:
         """Cancel all open orders and wait for holds to clear."""
@@ -215,11 +221,13 @@ class AlpacaBroker:
 
         # Phase 1: Cancel existing orders, execute sells
         self.cancel_open_orders()
-        buy_tickers = {o.ticker for o in buys}
+        target_tickers = {o.ticker for o in buys}
+        for o in sells:
+            if o.trim:
+                target_tickers.add(o.ticker)
         for order in sells:
             try:
-                # Full exit: close position. Trim: sell by notional.
-                is_exit = order.ticker not in buy_tickers
+                is_exit = order.ticker not in target_tickers
                 self._submit_order(order, close_position=is_exit)
             except Exception as e:
                 order.status = f"error: {e}"
@@ -249,9 +257,7 @@ class AlpacaBroker:
         if buys:
             account = self.get_account()
             current = self.get_positions()
-            buy_tickers = {o.ticker for o in buys}
-            # current reflects actual post-sell state (failed sells stay)
-            all_target_tickers = list(set(current.keys()) | buy_tickers)
+            all_target_tickers = list(set(current.keys()) | target_tickers)
             target_value = account["equity"] / len(all_target_tickers) if all_target_tickers else 0
 
             logger.info(

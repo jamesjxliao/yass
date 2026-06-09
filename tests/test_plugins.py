@@ -14,10 +14,11 @@ SIGNALS_DIR = Path(__file__).parent.parent / "signals"
 
 def test_discover_filters():
     filters = discover_filters(FILTERS_DIR)
-    assert len(filters) == 3
+    assert len(filters) == 4
     assert "market_cap_filter" in filters
     assert "volume_filter" in filters
     assert "price_above_sma" in filters
+    assert "low_volatility_filter" in filters
 
 
 def test_discover_signals():

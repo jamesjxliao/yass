@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from screener.trading.broker import RebalanceOrder
+from screener.trading.broker import RebalanceOrder, compute_rebalance_orders
 
 logger = logging.getLogger(__name__)
 
@@ -273,38 +273,8 @@ class EtoroBroker:
     ) -> list[RebalanceOrder]:
         if account is None:
             account = self.get_account()
-
         current = self.resolve_positions(target_tickers)
-        portfolio_value = account["equity"]
-        target_weight = 1.0 / len(target_tickers) if target_tickers else 0
-        target_value = portfolio_value * target_weight
-
-        target_set = set(target_tickers)
-        current_set = set(current.keys())
-
-        orders: list[RebalanceOrder] = []
-
-        for ticker in current_set - target_set:
-            orders.append(RebalanceOrder(
-                ticker=ticker, side="sell", notional=current[ticker],
-            ))
-
-        for ticker in current_set & target_set:
-            diff = current[ticker] - target_value
-            if diff > target_value * 0.05:
-                orders.append(RebalanceOrder(
-                    ticker=ticker, side="sell", notional=diff, trim=True,
-                ))
-
-        for ticker in target_set:
-            current_value = current.get(ticker, 0)
-            diff = target_value - current_value
-            if diff > target_value * 0.05:
-                orders.append(RebalanceOrder(
-                    ticker=ticker, side="buy", notional=diff,
-                ))
-
-        return orders
+        return compute_rebalance_orders(target_tickers, account["equity"], current)
 
     def _open_position(
         self, instrument_id: int, amount: float, stop_loss_rate: float | None = None,
@@ -321,12 +291,12 @@ class EtoroBroker:
         else:
             body["IsNoStopLoss"] = True
 
-        resp = self._client.post(
+        resp = self._request_with_retry(
+            "post",
             self._execution_url("market-open-orders/by-amount"),
             json=body,
             headers=self._headers(),
         )
-        resp.raise_for_status()
         return resp.json()
 
     def _close_position(
@@ -336,12 +306,12 @@ class EtoroBroker:
         body: dict = {"InstrumentId": instrument_id}
         if units_to_deduct is not None:
             body["UnitsToDeduct"] = round(units_to_deduct, 5)
-        resp = self._client.post(
+        resp = self._request_with_retry(
+            "post",
             self._execution_url(f"market-close-orders/positions/{position_id}"),
             json=body,
             headers=self._headers(),
         )
-        resp.raise_for_status()
         return resp.json()
 
     def _execute_trim(
@@ -357,12 +327,14 @@ class EtoroBroker:
 
         sorted_positions = sorted(positions, key=lambda p: p.units, reverse=True)
         remaining = units_to_sell
-        for pos in sorted_positions:
+        for i, pos in enumerate(sorted_positions):
             if remaining <= 0:
                 break
             deduct = min(remaining, pos.units * 0.999)
             if deduct < 0.001:
                 continue
+            if i > 0:
+                time.sleep(0.5)
             self._close_position(pos.position_id, pos.instrument_id, units_to_deduct=deduct)
             remaining -= deduct
             logger.info(
@@ -458,7 +430,9 @@ class EtoroBroker:
                 if order.trim:
                     self._execute_trim(order, positions_to_close)
                 else:
-                    for pos in positions_to_close:
+                    for i, pos in enumerate(positions_to_close):
+                        if i > 0:
+                            time.sleep(0.5)
                         self._close_position(pos.position_id, pos.instrument_id)
                 order.status = "submitted"
                 logger.info("SELL %s $%.2f — submitted", order.ticker, order.notional)
@@ -481,10 +455,11 @@ class EtoroBroker:
         if buys:
             account = self.get_account()
             buy_tickers = {o.ticker for o in buys}
-            sold_tickers = {o.ticker for o in sells if o.status == "submitted"}
-            all_candidates = list(buy_tickers | (set(pos_by_ticker.keys()) - sold_tickers))
+            exited_tickers = {o.ticker for o in sells
+                              if o.status == "submitted" and not o.trim}
+            all_candidates = list(buy_tickers | (set(pos_by_ticker.keys()) - exited_tickers))
             current = self.resolve_positions(all_candidates)
-            for t in sold_tickers:
+            for t in exited_tickers:
                 current.pop(t, None)
             all_target = list(set(current.keys()) | buy_tickers)
             target_value = account["equity"] / len(all_target) if all_target else 0
@@ -493,6 +468,7 @@ class EtoroBroker:
                 "Cash available: $%.2f — target $%.2f per stock",
                 account["cash"], target_value,
             )
+            submitted_buys = 0
             for order in buys:
                 current_value = current.get(order.ticker, 0)
                 order.notional = max(target_value - current_value, 0)
@@ -518,9 +494,12 @@ class EtoroBroker:
                         )
                         continue
 
+                if submitted_buys > 0:
+                    time.sleep(0.5)
                 try:
                     self._open_position(iid, order.notional, stop_loss_rate=stop_rate)
                     order.status = "submitted"
+                    submitted_buys += 1
                     logger.info("BUY %s $%.2f — submitted", order.ticker, order.notional)
                 except Exception as e:
                     order.status = f"error: {e}"

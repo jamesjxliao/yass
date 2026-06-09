@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from screener.trading.broker import RebalanceOrder
+from screener.trading.broker import RebalanceOrder, compute_rebalance_orders
 
 logger = logging.getLogger(__name__)
 
@@ -83,37 +83,7 @@ class RobinhoodBroker:
         account: dict,
         current: dict[str, float],
     ) -> list[RebalanceOrder]:
-        """Compute equal-weight rebalance orders with 5% tolerance band."""
-        equity = account["equity"]
-        target_weight = 1.0 / len(target_tickers) if target_tickers else 0
-        target_value = equity * target_weight
-
-        target_set = set(target_tickers)
-        current_set = set(current.keys())
-
-        orders: list[RebalanceOrder] = []
-
-        for ticker in current_set - target_set:
-            orders.append(RebalanceOrder(
-                ticker=ticker, side="sell", notional=current[ticker],
-            ))
-
-        for ticker in current_set & target_set:
-            diff = current[ticker] - target_value
-            if diff > target_value * 0.05:
-                orders.append(RebalanceOrder(
-                    ticker=ticker, side="sell", notional=diff, trim=True,
-                ))
-
-        for ticker in target_set:
-            current_value = current.get(ticker, 0)
-            diff = target_value - current_value
-            if diff > target_value * 0.05:
-                orders.append(RebalanceOrder(
-                    ticker=ticker, side="buy", notional=diff,
-                ))
-
-        return orders
+        return compute_rebalance_orders(target_tickers, account["equity"], current)
 
     def format_mcp_order(
         self,

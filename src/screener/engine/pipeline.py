@@ -18,6 +18,7 @@ def enrich_with_price_data(
     Computes:
     - momentum_12m_return: 12-month return excluding most recent month
     - sma_200: 200-day simple moving average of close price
+    - realized_vol_20d: annualized 20-day realized volatility
     """
     if prices.is_empty() or fundamentals.is_empty():
         return fundamentals
@@ -43,9 +44,16 @@ def enrich_with_price_data(
         .alias("momentum_12m_return")
     ).select("ticker", "momentum_12m_return")
 
+    # Realized volatility: annualized std of daily log returns over last 20 days
+    vol_data = sorted_prices.group_by("ticker").agg(
+        (pl.col("close").tail(21).pct_change().drop_nulls().std() * (252 ** 0.5))
+        .alias("realized_vol_20d"),
+    )
+
     result = fundamentals
     result = result.join(sma_data, on="ticker", how="left")
     result = result.join(momentum_data, on="ticker", how="left")
+    result = result.join(vol_data, on="ticker", how="left")
 
     return result
 
