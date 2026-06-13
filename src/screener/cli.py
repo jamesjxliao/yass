@@ -66,6 +66,27 @@ def _make_pit_server(provider, cache, pipeline_config: PipelineConfig):
     return PITDataServer(provider, cache, um)
 
 
+def _backtest_universe(cache, provider, universe: str) -> list[str]:
+    """Full PIT membership (active + departed) for survivorship-correct backtest price_data.
+
+    `get_universe` returns only *current* members, so departed names the screener
+    selects can't be priced — the backtest silently trades survivors and the Sharpe
+    is inflated (~+0.03 for sp500). Pricing the full historical membership fixes it.
+    Falls back to current constituents when membership history isn't loaded (e.g. mock).
+    """
+    try:
+        rows = cache.to_polars(
+            "SELECT DISTINCT ticker FROM universe_membership WHERE index_name = ?",
+            [universe],
+        )
+        members = [t for t in rows["ticker"].to_list() if "/" not in t]
+        if members:
+            return members
+    except Exception:
+        pass
+    return provider.get_universe(universe)
+
+
 @app.command()
 def screen(
     config: Annotated[Path, typer.Option(help="Config YAML")] = Path("config/default.yaml"),
@@ -143,7 +164,7 @@ def backtest(
     start = date.fromisoformat(start_date)
     end = date.fromisoformat(end_date)
 
-    tickers = provider.get_universe(pipeline_config.universe)
+    tickers = _backtest_universe(cache, provider, pipeline_config.universe)
     price_data = provider.get_prices(
         tickers, start - timedelta(days=400), end
     )
@@ -186,7 +207,7 @@ def run_research(
 
     pit_server = PITDataServer(provider, cache, um)
 
-    tickers = provider.get_universe("sp500")
+    tickers = _backtest_universe(cache, provider, "sp500")
     price_data = provider.get_prices(
         tickers, experiment.backtest_start, experiment.backtest_end
     )
@@ -284,6 +305,22 @@ def fetch_history(
     typer.echo("Warming fundamentals cache...")
     provider.get_fundamentals(tickers)
 
+    # Surface per-ticker staleness: FMP's quarterly key-metrics lags filings by a
+    # variable amount, so some tickers can stay a quarter behind even after a full
+    # re-fetch. The global max(report_date) check can't see a lone straggler.
+    from screener.data.staleness import find_stale_quarters
+
+    stale = find_stale_quarters(cache)
+    if stale:
+        top = ", ".join(f"{s.ticker}(+{s.quarters_behind}Q)" for s in stale[:8])
+        typer.echo(
+            f"⚠ PIT freshness: {len(stale)} ticker(s) overdue for a newer quarter "
+            f"(FMP compute lag): {top}{' ...' if len(stale) > 8 else ''}"
+        )
+        typer.echo("  Detail: poetry run python scripts/check_pit_staleness.py --verbose")
+    else:
+        typer.echo("PIT freshness: all tickers current.")
+
     typer.echo("Done. Historical data cached in DuckDB.")
     cache.close()
 
@@ -313,7 +350,7 @@ def evaluate(
 
     start = date.fromisoformat(start_date)
     end = date.fromisoformat(end_date)
-    tickers = provider.get_universe(pipeline_config.universe)
+    tickers = _backtest_universe(cache, provider, pipeline_config.universe)
     price_data = cache.get_prices(tickers, str(start - timedelta(days=400)), str(end))
 
     report = run_full_evaluation(
@@ -430,7 +467,7 @@ def lab(
 
     start = date.fromisoformat(start_date)
     end = date.fromisoformat(end_date)
-    tickers = provider.get_universe(pipeline_config.universe)
+    tickers = _backtest_universe(cache, provider, pipeline_config.universe)
     price_data = cache.get_prices(tickers, str(start - timedelta(days=400)), str(end))
 
     metrics = run_backtest(
