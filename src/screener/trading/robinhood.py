@@ -29,14 +29,33 @@ class RobinhoodBroker:
 
     @staticmethod
     def parse_portfolio(portfolio_data: dict) -> dict:
-        """Parse get_portfolio MCP response into standard account dict."""
-        equity = float(portfolio_data.get("equity", 0))
-        buying_power = float(portfolio_data.get("buying_power", 0))
+        """Parse get_portfolio MCP response into standard account dict.
+
+        The MCP `get_portfolio` payload (the inner `data` object — this also
+        unwraps a `{"data": {...}}` envelope if passed whole) carries:
+          - total_value:  positions + cash (what we rebalance against)
+          - equity_value: market value of equity positions only
+          - cash:         settled cash
+          - buying_power: nested dict, real spendable figure
+        `equity` is set to **total_value** so newly-added cash deploys into the
+        target weights — using equity_value alone would strand the cash.
+        """
+        d = portfolio_data.get("data", portfolio_data)
+
+        total_value = float(d.get("total_value", 0) or 0)
+        equity_value = float(d.get("equity_value", 0) or 0)
+        cash = float(d.get("cash", 0) or 0)
+
+        bp = d.get("buying_power", 0)
+        if isinstance(bp, dict):
+            bp = bp.get("buying_power", 0)
+        buying_power = float(bp or 0)
+
         return {
-            "equity": equity,
-            "cash": buying_power,
+            "equity": total_value,
+            "cash": cash,
             "buying_power": buying_power,
-            "portfolio_value": equity - buying_power,
+            "portfolio_value": equity_value,
         }
 
     @staticmethod

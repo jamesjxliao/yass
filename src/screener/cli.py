@@ -94,6 +94,14 @@ def screen(
     output: Annotated[str, typer.Option(help="Output: console, json, csv")] = "console",
     output_path: Annotated[str, typer.Option(help="Output file path")] = "",
     as_of: Annotated[str, typer.Option(help="Screen as of date (YYYY-MM-DD), uses PIT data")] = "",
+    hold_bonus_tickers: Annotated[
+        str,
+        typer.Option(
+            help="Comma-separated tickers to apply the config's hold bonus to "
+            "(currently-held names). Used by the /rebalance skill to keep picks "
+            "stable across accounts. Empty = no hold bonus."
+        ),
+    ] = "",
     verbose: Annotated[bool, typer.Option("--verbose")] = False,
 ) -> None:
     """Run the screener with the given config and output top N candidates."""
@@ -127,7 +135,12 @@ def screen(
         prices = provider.get_prices(tickers, today - timedelta(days=400), today)
         df = enrich_with_price_data(df, prices)
 
-    result = pipeline.run(df)
+    held = {t.strip().upper() for t in hold_bonus_tickers.split(",") if t.strip()}
+    result = pipeline.run(
+        df,
+        hold_bonus_tickers=held or None,
+        hold_bonus=pipeline_config.hold_bonus if held else 0.0,
+    )
 
     if output == "json" and output_path:
         to_json(result, Path(output_path))

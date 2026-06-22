@@ -6,26 +6,40 @@ from screener.trading.robinhood import RobinhoodBroker, RobinhoodPosition
 class TestParsePortfolio:
 
     def test_basic_portfolio(self):
-        data = {"equity": 50000.0, "buying_power": 10000.0}
+        # Real get_portfolio MCP shape: nested buying_power, total_value = equity + cash
+        data = {
+            "total_value": "50000.0",
+            "equity_value": "40000.0",
+            "cash": "10000.0",
+            "buying_power": {"buying_power": "10000.0"},
+        }
         result = RobinhoodBroker.parse_portfolio(data)
 
+        # equity is total_value so newly-added cash deploys into target weights
         assert result["equity"] == 50000.0
         assert result["cash"] == 10000.0
         assert result["buying_power"] == 10000.0
         assert result["portfolio_value"] == 40000.0
 
-    def test_empty_portfolio(self):
-        data = {"equity": 0, "buying_power": 0}
+    def test_unwraps_data_envelope(self):
+        data = {"data": {
+            "total_value": "39847.40",
+            "equity_value": "19838.78",
+            "cash": "20008.62",
+            "buying_power": {"buying_power": "20008.62"},
+        }}
         result = RobinhoodBroker.parse_portfolio(data)
 
-        assert result["equity"] == 0
-        assert result["cash"] == 0
+        assert result["equity"] == 39847.40
+        assert result["cash"] == 20008.62
+        assert result["buying_power"] == 20008.62
 
-    def test_missing_fields_default_zero(self):
+    def test_empty_portfolio(self):
         result = RobinhoodBroker.parse_portfolio({})
 
         assert result["equity"] == 0
         assert result["cash"] == 0
+        assert result["buying_power"] == 0
 
 
 class TestParsePositions:
