@@ -50,6 +50,7 @@ select = ["E", "F", "I", "N", "W"]
 "src/screener/evaluation/report.py" = ["N803", "N806"]
 "tests/test_evaluation.py" = ["N806"]
 # ML/math conventions (X, y, T) and verbose log/print lines in the research model
+# research harnesses: compact guard lines (append/reset/continue) in rebalance loops
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

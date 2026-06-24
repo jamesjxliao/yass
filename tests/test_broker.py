@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 from screener.trading.broker import AlpacaBroker, RebalanceOrder
 
 
@@ -108,6 +109,31 @@ def test_buy_amount_recomputed_from_equity():
     buy_order = [o for o in submitted if o.side.value == "buy"][0]
     # Should be ~33333, NOT the original 99999
     assert buy_order.notional < 40000
+
+
+def test_execute_orders_phase2_respects_target_weights():
+    """Phase 2 buy recompute must size by target_weights, not equal 1/N."""
+    client = MagicMock()
+    client.cancel_orders.return_value = []
+    client.get_orders.return_value = []
+    client.get_account.return_value = _mock_account(equity=100000, cash=100000)
+    client.get_all_positions.return_value = []  # all cash, no positions
+    client.get_positions.return_value = []
+
+    broker = _make_broker(client)
+    orders = [
+        RebalanceOrder(ticker="LOWVOL", side="buy", notional=1),
+        RebalanceOrder(ticker="HIGHVOL", side="buy", notional=1),
+    ]
+    # 70/30 split — equal weight would give 50k/50k
+    broker.execute_orders(
+        orders, dry_run=False, target_weights={"LOWVOL": 0.7, "HIGHVOL": 0.3},
+    )
+
+    submitted = [c[0][0] for c in client.submit_order.call_args_list]
+    by_ticker = {o.symbol: o for o in submitted if o.side.value == "buy"}
+    assert by_ticker["LOWVOL"].notional == pytest.approx(70000, abs=1)
+    assert by_ticker["HIGHVOL"].notional == pytest.approx(30000, abs=1)
 
 
 def test_stops_placed_for_all_positions():

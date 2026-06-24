@@ -25,7 +25,7 @@ def to_console(df: pl.DataFrame, top_n: int | None = None) -> str:
     display_df = df.head(top_n) if top_n else df
 
     # Select key columns for display
-    display_cols = ["ticker", "composite_score"]
+    display_cols = ["ticker", "composite_score", "target_weight"]
     z_cols = [c for c in display_df.columns if c.startswith("z_")]
     display_cols.extend(z_cols)
 

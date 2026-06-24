@@ -7,7 +7,11 @@ from dataclasses import dataclass
 
 import httpx
 
-from screener.trading.broker import RebalanceOrder, compute_rebalance_orders
+from screener.trading.broker import (
+    RebalanceOrder,
+    compute_rebalance_orders,
+    target_value_for,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -270,11 +274,14 @@ class EtoroBroker:
 
     def compute_rebalance_orders(
         self, target_tickers: list[str], account: dict | None = None,
+        target_weights: dict[str, float] | None = None,
     ) -> list[RebalanceOrder]:
         if account is None:
             account = self.get_account()
         current = self.resolve_positions(target_tickers)
-        return compute_rebalance_orders(target_tickers, account["equity"], current)
+        return compute_rebalance_orders(
+            target_tickers, account["equity"], current, target_weights,
+        )
 
     def _open_position(
         self, instrument_id: int, amount: float, stop_loss_rate: float | None = None,
@@ -393,8 +400,13 @@ class EtoroBroker:
         orders: list[RebalanceOrder],
         dry_run: bool = False,
         stop_loss_pct: float = 0.0,
+        target_weights: dict[str, float] | None = None,
     ) -> list[RebalanceOrder]:
-        """Execute rebalance: close sells first, then open buys."""
+        """Execute rebalance: close sells first, then open buys.
+
+        target_weights: optional {ticker: weight} for non-equal sizing; the
+            Phase-2 buy recompute scales each buy by its weight (None ⇒ equal).
+        """
         sells = [o for o in orders if o.side == "sell"]
         buys = [o for o in orders if o.side == "buy"]
 
@@ -462,16 +474,26 @@ class EtoroBroker:
             for t in exited_tickers:
                 current.pop(t, None)
             all_target = list(set(current.keys()) | buy_tickers)
-            target_value = account["equity"] / len(all_target) if all_target else 0
+            equity = account["equity"]
+            n_equal = len(all_target)
 
             logger.info(
-                "Cash available: $%.2f — target $%.2f per stock",
-                account["cash"], target_value,
+                "Cash available: $%.2f — sizing %d buys (%s)",
+                account["cash"], len(buys),
+                "inverse-vol" if target_weights else "equal-weight",
             )
             submitted_buys = 0
+            # eToro closes are async (and silently no-op under PDT); the freed
+            # cash may not have settled. Clamp buys to available cash so a fully-
+            # invested swap can't over-submit beyond what's actually spendable.
+            cash_remaining = account.get("cash", 0.0)
             for order in buys:
                 current_value = current.get(order.ticker, 0)
+                target_value = target_value_for(
+                    order.ticker, equity, target_weights, n_equal
+                )
                 order.notional = max(target_value - current_value, 0)
+                order.notional = min(order.notional, max(cash_remaining, 0))
                 if order.notional < 1:
                     order.status = "skipped"
                     continue
@@ -500,6 +522,7 @@ class EtoroBroker:
                     self._open_position(iid, order.notional, stop_loss_rate=stop_rate)
                     order.status = "submitted"
                     submitted_buys += 1
+                    cash_remaining -= order.notional
                     logger.info("BUY %s $%.2f — submitted", order.ticker, order.notional)
                 except Exception as e:
                     order.status = f"error: {e}"

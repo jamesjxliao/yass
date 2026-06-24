@@ -20,9 +20,14 @@ class ValueCompositeSignal:
                 s = df[col].cast(pl.Float64).fill_null(0.0).fill_nan(0.0)
                 components.append(minmax(s))
 
-        # Lower is better: ev_to_sales (invert)
+        # Lower is better: ev_to_sales (invert). Clip at the 95th pct first — it
+        # is >=0 and explodes for low-revenue firms; one huge value would collapse
+        # minmax to ~constant and silently drop the axis for all normal firms.
         if "ev_to_sales" in df.columns:
             s = df["ev_to_sales"].cast(pl.Float64).fill_null(0.0).fill_nan(0.0)
+            cap = s.quantile(0.95)
+            if cap is not None and cap > 0:
+                s = s.clip(upper_bound=cap)
             components.append(1.0 - minmax(s))
 
         # Fallback columns from mock data

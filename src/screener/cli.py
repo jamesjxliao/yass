@@ -66,6 +66,26 @@ def _make_pit_server(provider, cache, pipeline_config: PipelineConfig):
     return PITDataServer(provider, cache, um)
 
 
+def _resolve_target_weights(result, weighting: str, picks: list) -> dict:
+    """Compute per-ticker target weights for `picks` and echo them if non-equal.
+
+    Shared by the live trade paths (Alpaca/eToro) so their sizing and display
+    stay identical. `result` must cover the picks' rows (with `realized_vol_20d`).
+    """
+    import polars as pl
+
+    from screener.engine.weighting import compute_weights
+
+    target_weights = compute_weights(
+        result.filter(pl.col("ticker").is_in(picks)), weighting
+    )
+    if weighting != "equal":
+        typer.echo(f"Weighting: {weighting}")
+        for t in picks:
+            typer.echo(f"  {t:<6} {target_weights.get(t, 0):>6.1%}")
+    return target_weights
+
+
 def _backtest_universe(cache, provider, universe: str) -> list[str]:
     """Full PIT membership (active + departed) for survivorship-correct backtest price_data.
 
@@ -142,6 +162,17 @@ def screen(
         hold_bonus=pipeline_config.hold_bonus if held else 0.0,
     )
 
+    # Attach the config's intended position weight per pick (equal or inverse_vol),
+    # so downstream consumers (rebalance/robinhood skills) size positions to match.
+    import polars as pl
+
+    from screener.engine.weighting import compute_weights
+
+    weights = compute_weights(result, pipeline_config.weighting)
+    result = result.with_columns(
+        pl.col("ticker").replace_strict(weights, default=None).alias("target_weight")
+    )
+
     if output == "json" and output_path:
         to_json(result, Path(output_path))
         typer.echo(f"Results written to {output_path}")
@@ -192,6 +223,7 @@ def backtest(
         frequency=pipeline_config.rebalance_frequency,
         position_stop_loss=pipeline_config.position_stop_loss,
         hold_bonus=pipeline_config.hold_bonus,
+        weighting=pipeline_config.weighting,
     )
 
     typer.echo(metrics.summary())
@@ -222,7 +254,10 @@ def run_research(
 
     tickers = _backtest_universe(cache, provider, "sp500")
     price_data = provider.get_prices(
-        tickers, experiment.backtest_start, experiment.backtest_end
+        # 400-day lookback buffer so momentum_12m/sma_200 aren't null/biased for
+        # the first ~12 months of the window (matches lab/backtest/evaluate).
+        tickers, experiment.backtest_start - timedelta(days=400),
+        experiment.backtest_end,
     )
 
     loop = ResearchLoop(
@@ -350,7 +385,6 @@ def evaluate(
     _setup_logging(verbose)
 
     import polars as pl
-    from dateutil.relativedelta import relativedelta
 
     from screener.evaluation.report import run_full_evaluation
 
@@ -376,6 +410,8 @@ def evaluate(
         monte_carlo_iterations=monte_carlo,
         position_stop_loss=pipeline_config.position_stop_loss,
         hold_bonus=pipeline_config.hold_bonus,
+        weighting=pipeline_config.weighting,
+        frequency=pipeline_config.rebalance_frequency,
     )
 
     typer.echo(report.summary())
@@ -422,23 +458,31 @@ def evaluate(
 
     # Collect holdings at each rebalance for timeline chart
     typer.echo("Generating holdings timeline...")
+    from screener.backtest.runner import _generate_rebalance_dates
     from screener.engine.pipeline import enrich_with_price_data
 
     holdings = []
-    curr = date.fromisoformat(start_date)
-    while curr < end:
-        universe = pit_server.get_tradeable_tickers(curr)
+    prev: set = set()
+    for curr in _generate_rebalance_dates(
+        date.fromisoformat(start_date), end, pipeline_config.rebalance_frequency
+    ):
+        # Mirror the backtest's selection: index∩tradeable universe, hold_bonus
+        # stickiness, configured cadence — so the turnover chart matches the
+        # evaluated portfolio instead of a pure monthly top-10 re-screen (#23).
+        universe = pit_server.get_universe_as_of(pipeline_config.universe, curr)
         screening = pit_server.get_screening_data(universe, curr)
         if not screening.is_empty():
             ph = price_data.filter(pl.col("date") < curr)
             enriched = enrich_with_price_data(screening, ph)
-            result = pipeline.run(enriched)
+            result = pipeline.run(
+                enriched,
+                hold_bonus_tickers=prev if pipeline_config.hold_bonus > 0 else None,
+                hold_bonus=pipeline_config.hold_bonus,
+            )
             if not result.is_empty():
-                holdings.append({
-                    "date": curr,
-                    "picks": result["ticker"].to_list(),
-                })
-        curr += relativedelta(months=1)
+                picks = result["ticker"].to_list()
+                holdings.append({"date": curr, "picks": picks})
+                prev = set(picks)
 
     plot_holdings_timeline(holdings, out_dir / "holdings_timeline.png")
 
@@ -490,8 +534,10 @@ def lab(
         universe_index=pipeline_config.universe,
         start_date=start,
         end_date=end,
+        frequency=pipeline_config.rebalance_frequency,
         position_stop_loss=pipeline_config.position_stop_loss,
         hold_bonus=pipeline_config.hold_bonus,
+        weighting=pipeline_config.weighting,
     )
 
     # Machine-readable output for autonomous agent parsing
@@ -601,7 +647,9 @@ def trade(
     picks = result["ticker"].to_list()
     typer.echo(f"Target portfolio ({len(picks)} stocks): {', '.join(picks)}")
 
-    orders = broker.compute_rebalance_orders(picks, account)
+    target_weights = _resolve_target_weights(result, pipeline_config.weighting, picks)
+
+    orders = broker.compute_rebalance_orders(picks, account, target_weights)
 
     if not orders:
         typer.echo("Portfolio already balanced — no trades needed")
@@ -616,6 +664,7 @@ def trade(
         results = broker.execute_orders(
             orders, dry_run=dry_run,
             stop_loss_pct=pipeline_config.position_stop_loss,
+            target_weights=target_weights,
         )
 
         submitted = sum(1 for o in results if o.status == "submitted")
@@ -645,6 +694,8 @@ def trade(
         "dry_run": dry_run,
         "account": account,
         "picks": picks,
+        "weighting": pipeline_config.weighting,
+        "target_weights": target_weights,
         "previous_positions": list(current.keys()),
         "orders": [
             {"ticker": o.ticker, "side": o.side,
@@ -727,8 +778,16 @@ def etoro_trade(
     if unresolved:
         typer.echo(f"Warning: could not resolve eToro instrument IDs for: {', '.join(unresolved)}")
         picks = [t for t in picks if t in resolved]
+        if pipeline_config.weighting != "equal":
+            typer.echo(
+                "  → weights renormalized over the remaining picks; eToro sizing "
+                "will differ from brokers that hold the dropped name(s)."
+            )
 
-    orders = broker.compute_rebalance_orders(picks, account)
+    # Weight over the resolvable picks (renormalized to sum to 1).
+    target_weights = _resolve_target_weights(result, pipeline_config.weighting, picks)
+
+    orders = broker.compute_rebalance_orders(picks, account, target_weights)
 
     if not orders:
         typer.echo("Portfolio already balanced — no trades needed")
@@ -743,6 +802,7 @@ def etoro_trade(
         results = broker.execute_orders(
             orders, dry_run=dry_run,
             stop_loss_pct=pipeline_config.position_stop_loss,
+            target_weights=target_weights,
         )
 
         submitted = sum(1 for o in results if o.status == "submitted")
@@ -773,6 +833,8 @@ def etoro_trade(
         "dry_run": dry_run,
         "account": account,
         "picks": picks,
+        "weighting": pipeline_config.weighting,
+        "target_weights": target_weights,
         "previous_positions": list(current.keys()),
         "orders": [
             {"ticker": o.ticker, "side": o.side,

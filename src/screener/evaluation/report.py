@@ -11,7 +11,7 @@ from dateutil.relativedelta import relativedelta
 
 from screener.backtest.metrics import BacktestMetrics, compute_sharpe
 from screener.backtest.pit_server import PITDataServer
-from screener.backtest.runner import run_backtest
+from screener.backtest.runner import _generate_rebalance_dates, run_backtest
 from screener.backtest.walkforward import (
     WalkForwardConfig,
     generate_folds,
@@ -242,8 +242,17 @@ def run_monte_carlo(
     end_date: date,
     n_iterations: int = 500,
     transaction_cost_bps: float = 10.0,
+    weighting: str = "equal",
+    frequency: str = "monthly",
 ) -> MonteCarloResult:
-    """Compare strategy Sharpe against randomly selected portfolios."""
+    """Compare strategy Sharpe against randomly selected portfolios.
+
+    The random portfolios are equal-weight by construction; the ``actual``
+    strategy backtest uses ``weighting`` so its Sharpe matches the rest of the
+    report. Random portfolios sample the SAME index∩tradeable universe the
+    strategy uses (get_universe_as_of), not the wider tradeable superset, so the
+    null is like-for-like (#11).
+    """
     logger.info("Running Monte Carlo with %d iterations...", n_iterations)
 
     actual = run_backtest(
@@ -254,10 +263,12 @@ def run_monte_carlo(
         start_date=start_date,
         end_date=end_date,
         transaction_cost_bps=transaction_cost_bps,
+        weighting=weighting,
+        frequency=frequency,
     )
 
     # Pre-compute data for all periods (avoid repeated filtering in threads)
-    rebalance_dates = _generate_monthly_dates(start_date, end_date)
+    rebalance_dates = _generate_rebalance_dates(start_date, end_date, frequency)
     tickers_by_date: dict[int, list[str]] = {}
     prices_by_period: dict[int, dict[str, float]] = {}
 
@@ -265,7 +276,10 @@ def run_monte_carlo(
         rebal = rebalance_dates[i]
         next_rebal = rebalance_dates[i + 1]
 
-        tickers_by_date[i] = pit_server.get_tradeable_tickers(rebal)
+        # Same universe the strategy trades (membership ∩ tradeable), NOT the
+        # wider tradeable superset — else the null is a weaker, off-index sample
+        # that depresses random Sharpes and inflates apparent significance (#11).
+        tickers_by_date[i] = pit_server.get_universe_as_of(universe_index, rebal)
 
         period_prices = price_data.filter(
             (pl.col("date") >= rebal) & (pl.col("date") < next_rebal)
@@ -315,9 +329,10 @@ def run_factor_attribution(
     universe_index: str,
     start_date: date,
     end_date: date,
+    frequency: str = "monthly",
 ) -> FactorAttributionResult:
     """Regress strategy returns against simple factor portfolios."""
-    rebalance_dates = _generate_monthly_dates(start_date, end_date)
+    rebalance_dates = _generate_rebalance_dates(start_date, end_date, frequency)
 
     factor_returns: dict[str, list[float]] = {
         "momentum": [],
@@ -367,8 +382,12 @@ def run_factor_attribution(
             price_history.filter(pl.col("ticker").is_in(tickers))
             .sort("date")
             .group_by("ticker")
+            # Fixed 252-day trailing window — matches the strategy's real momentum
+            # factor (pipeline.py). first()/last() over all pre-rebal history grows
+            # from ~1y to ~9.5y across the backtest, ranking by longest cumulative
+            # winner instead of momentum, corrupting the regressed loading.
             .agg([
-                pl.col("close").first().alias("old"),
+                pl.col("close").tail(252).first().alias("old"),
                 pl.col("close").last().alias("recent"),
             ])
             .with_columns(((pl.col("recent") / pl.col("old")) - 1).alias("mom"))
@@ -560,9 +579,10 @@ def run_regime_analysis(
     price_data: pl.DataFrame,
     start_date: date,
     end_date: date,
+    frequency: str = "monthly",
 ) -> RegimeResult:
     """Analyze strategy performance in bull/flat/bear market regimes."""
-    rebalance_dates = _generate_monthly_dates(start_date, end_date)
+    rebalance_dates = _generate_rebalance_dates(start_date, end_date, frequency)
 
     regimes: dict[str, list[float]] = {"Bull": [], "Flat": [], "Bear": []}
 
@@ -622,6 +642,8 @@ def run_full_evaluation(
     transaction_cost_bps: float = 10.0,
     position_stop_loss: float = 0.0,
     hold_bonus: float = 0.0,
+    weighting: str = "equal",
+    frequency: str = "monthly",
 ) -> EvaluationReport:
     """Run all evaluation analyses and produce a comprehensive report."""
     logger.info("Starting full evaluation...")
@@ -635,9 +657,11 @@ def run_full_evaluation(
         universe_index=universe_index,
         start_date=start_date,
         end_date=end_date,
+        frequency=frequency,
         transaction_cost_bps=transaction_cost_bps,
         position_stop_loss=position_stop_loss,
         hold_bonus=hold_bonus,
+        weighting=weighting,
     )
 
     # 2. Monte Carlo
@@ -651,6 +675,8 @@ def run_full_evaluation(
         end_date=end_date,
         n_iterations=monte_carlo_iterations,
         transaction_cost_bps=transaction_cost_bps,
+        weighting=weighting,
+        frequency=frequency,
     )
 
     # 3. Factor attribution
@@ -662,6 +688,7 @@ def run_full_evaluation(
         universe_index=universe_index,
         start_date=start_date,
         end_date=end_date,
+        frequency=frequency,
     )
 
     # 4. Signal correlations
@@ -681,6 +708,7 @@ def run_full_evaluation(
         price_data=price_data,
         start_date=start_date,
         end_date=end_date,
+        frequency=frequency,
     )
 
     # 6. Walk-forward
@@ -704,6 +732,10 @@ def run_full_evaluation(
             start_date=test_s,
             end_date=test_e,
             transaction_cost_bps=transaction_cost_bps,
+            weighting=weighting,
+            frequency=frequency,
+            hold_bonus=hold_bonus,
+            position_stop_loss=position_stop_loss,
         )
         if m.sharpe_ratio > 0:
             positive += 1

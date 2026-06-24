@@ -15,6 +15,7 @@ from screener.backtest.walkforward import (
     generate_folds,
 )
 from screener.engine.pipeline import ScreeningPipeline, enrich_with_price_data
+from screener.engine.weighting import compute_weights
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,7 @@ def run_backtest(
     momentum_cap: float = 0.0,
     position_stop_loss: float = 0.0,
     hold_bonus: float = 0.0,
+    weighting: str = "equal",
 ) -> BacktestMetrics:
     """Run a backtest with turnover-based transaction costs.
 
@@ -82,6 +84,7 @@ def run_backtest(
         momentum_cap: Exclude stocks with momentum_12m_return above this (e.g. 2.0).
         position_stop_loss: Exit stocks whose intra-period low breaches this level (e.g. 0.15).
         hold_bonus: Z-score bonus for current holdings to reduce turnover (e.g. 1.0).
+        weighting: Position-sizing scheme — "equal" (1/N) or "inverse_vol" (~1/realized_vol).
     """
     rebalance_dates = _generate_rebalance_dates(start_date, end_date, frequency)
     periods_per_year = {"weekly": 52, "quarterly": 4}.get(frequency, 12)
@@ -91,6 +94,7 @@ def run_backtest(
 
     periodic_returns = []
     prev_picks: set[str] = set()
+    prev_weights: dict[str, float] = {}  # last period's target weights (for drift cost)
     total_swaps = 0
     in_cash = False  # portfolio stop-loss state
 
@@ -145,6 +149,8 @@ def run_backtest(
             continue
 
         pick_tickers = set(picks["ticker"].to_list())
+        # Target weights for this period (None ⇒ equal, handled as simple mean).
+        new_weights = compute_weights(picks, weighting) if weighting != "equal" else None
 
         # Compute turnover-based transaction cost
         turnover = _compute_turnover(prev_picks, pick_tickers)
@@ -154,26 +160,60 @@ def run_backtest(
         cost_multiplier = 1 if not prev_picks else 2
         cost = turnover * (transaction_cost_bps / 10_000) * cost_multiplier
 
-        # Compute equal-weight return over holding period
-        period_prices = price_data.filter(
+        # Weighted strategies also re-size names HELD across the rebalance as
+        # their vols drift; the membership turnover above only charges names that
+        # fully enter/leave. Add the L1 weight change on held names, but only for
+        # names whose target moved beyond the live 5% no-trade band (broker.py
+        # TOLERANCE) — so the backtest charges drift cost only where the live
+        # path would actually re-trade.
+        if new_weights is not None and prev_weights:
+            held = prev_picks & pick_tickers
+            drift = 0.0
+            for t in held:
+                nw = new_weights.get(t, 0.0)
+                delta = abs(nw - prev_weights.get(t, 0.0))
+                if delta > 0.05 * nw:  # outside the 5% tolerance band → re-traded
+                    drift += delta
+            cost += drift * (transaction_cost_bps / 10_000)
+
+        # Holding-period prices over [rebal_date, next_rebal): start = entry close,
+        # min = intra-period low (for stops). The PERIOD-END price is the first
+        # close ON/AFTER next_rebal (the next rebalance's entry price), so
+        # consecutive periods chain and the boundary-day return of a held name is
+        # not dropped from compounding (#10). If a pick delists before next_rebal
+        # (no on/after close), carry to its last in-window trade (#12).
+        within = price_data.filter(
             pl.col("ticker").is_in(pick_tickers)
             & (pl.col("date") >= rebal_date)
             & (pl.col("date") < next_rebal)
         )
 
-        if period_prices.is_empty():
+        if within.is_empty():
             periodic_returns.append(-cost)
             prev_picks = pick_tickers
+            prev_weights = new_weights or {}
             continue
 
+        boundary = (
+            price_data.filter(
+                pl.col("ticker").is_in(pick_tickers) & (pl.col("date") >= next_rebal)
+            )
+            .sort("date")
+            .group_by("ticker")
+            .agg(pl.col("close").first().alias("boundary_close"))
+        )
         ticker_returns = (
-            period_prices.sort("date")
+            within.sort("date")
             .group_by("ticker")
             .agg([
                 pl.col("close").first().alias("start_price"),
-                pl.col("close").last().alias("end_price"),
+                pl.col("close").last().alias("last_within"),
                 pl.col("low").min().alias("min_price"),
             ])
+            .join(boundary, on="ticker", how="left")
+            .with_columns(
+                pl.coalesce(["boundary_close", "last_within"]).alias("end_price")
+            )
             .with_columns(
                 ((pl.col("end_price") / pl.col("start_price")) - 1).alias("return")
             )
@@ -200,7 +240,17 @@ def run_backtest(
             ).drop("_stopped")
             total_swaps += len(stopped_tickers)
 
-        avg_return = ticker_returns["return"].mean()
+        # Period return over the FULL pick set. A selected pick with no tradeable
+        # price this period (delisted just before rebalance) contributes 0 — its
+        # sleeve sits flat — NOT the survivors' average (#12): equal weight counts
+        # it as 0/N, inverse-vol contributes weight*0 (no renormalize-away).
+        ret_map = dict(zip(
+            ticker_returns["ticker"].to_list(), ticker_returns["return"].to_list()
+        ))
+        if new_weights is None:
+            avg_return = sum(ret_map.get(t, 0.0) for t in pick_tickers) / len(pick_tickers)
+        else:
+            avg_return = sum(w * ret_map.get(t, 0.0) for t, w in new_weights.items())
         stop_cost = 0.0
         if stopped_tickers:
             stop_cost = len(stopped_tickers) / len(pick_tickers) * (transaction_cost_bps / 10_000)
@@ -209,6 +259,7 @@ def run_backtest(
 
         # Stopped positions are sold — not carried into next period
         prev_picks = pick_tickers - stopped_tickers
+        prev_weights = new_weights or {}
 
     returns_series = pl.Series(periodic_returns)
     n_years = (end_date - start_date).days / 365.25
@@ -231,6 +282,7 @@ def run_walk_forward(
     frequency: str = "monthly",
     position_stop_loss: float = 0.0,
     hold_bonus: float = 0.0,
+    weighting: str = "equal",
 ) -> tuple[list[FoldResult], BacktestMetrics]:
     """Run walk-forward analysis across multiple folds."""
     folds = generate_folds(config)
@@ -238,6 +290,7 @@ def run_walk_forward(
 
     risk_params = {
         "transaction_cost_bps": transaction_cost_bps,
+        "weighting": weighting,
         "frequency": frequency,
         "position_stop_loss": position_stop_loss,
         "hold_bonus": hold_bonus,

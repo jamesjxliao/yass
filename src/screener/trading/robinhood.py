@@ -5,6 +5,14 @@ from dataclasses import dataclass
 
 from screener.trading.broker import RebalanceOrder, compute_rebalance_orders
 
+
+def _to_float(v) -> float | None:
+    """Parse a possibly-null/empty quote field to float, else None."""
+    try:
+        return float(v) if v not in (None, "", "0", "0.0", "0.0000") else None
+    except (TypeError, ValueError):
+        return None
+
 logger = logging.getLogger(__name__)
 
 
@@ -82,9 +90,17 @@ class RobinhoodBroker:
             market_value = quantity * avg_cost
             if quotes_data and symbol in quotes_data:
                 q = quotes_data[symbol]
-                price = float(
-                    q.get("last_trade_price",
-                          q.get("last_extended_hours_trade_price", avg_cost))
+                # Coalesce: dict.get returns a present-but-null/zero value (halted
+                # / after-hours / data-gap quote), so a bare get-chain yields None
+                # (→ float() TypeError) or 0 (→ market_value 0 → phantom re-buy).
+                # Take the first positive of last/ext-hours/avg_cost.
+                price = next(
+                    (p for p in (
+                        _to_float(q.get("last_trade_price")),
+                        _to_float(q.get("last_extended_hours_trade_price")),
+                        avg_cost,
+                    ) if p and p > 0),
+                    avg_cost,
                 )
                 market_value = quantity * price
 
@@ -101,8 +117,11 @@ class RobinhoodBroker:
         target_tickers: list[str],
         account: dict,
         current: dict[str, float],
+        target_weights: dict[str, float] | None = None,
     ) -> list[RebalanceOrder]:
-        return compute_rebalance_orders(target_tickers, account["equity"], current)
+        return compute_rebalance_orders(
+            target_tickers, account["equity"], current, target_weights,
+        )
 
     def format_mcp_order(
         self,

@@ -77,7 +77,11 @@ def load_signals(
     # Normalize weights
     if loaded:
         total_weight = sum(w for _, w in loaded)
-        if total_weight > 0:
-            loaded = [(s, w / total_weight) for s, w in loaded]
+        if total_weight <= 0:
+            raise ValueError(
+                f"Signal weights sum to {total_weight} (must be > 0); all-zero/"
+                "negative weights yield an order-dependent, meaningless ranking."
+            )
+        loaded = [(s, w / total_weight) for s, w in loaded]
 
     return loaded

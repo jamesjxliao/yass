@@ -110,7 +110,19 @@ class ResearchLoop:
 
         results: list[VariationResult] = []
 
-        for variation in experiment.variations:
+        for var_idx, variation in enumerate(experiment.variations):
+            # Re-check budget per-variation: the start-of-run check passes for a
+            # fresh name regardless of variation count, so an experiment with more
+            # variations than max_experiments would otherwise blow past the cap.
+            if not self._guardrails.check_experiment_budget(
+                experiment.name,
+                experiment.guardrails.max_experiments - var_idx,
+            ):
+                logger.warning(
+                    "Experiment budget reached after %d variations — stopping.",
+                    var_idx,
+                )
+                break
             logger.info("Running variation: %s", variation.name)
             experiment_id = str(uuid.uuid4())
 
@@ -133,6 +145,7 @@ class ResearchLoop:
                 universe_index=self._universe_index,
                 start_date=experiment.backtest_start,
                 end_date=experiment.guardrails.holdout_start,
+                frequency=experiment.rebalance_frequency,
             )
 
             warnings = self._guardrails.validate_results(
@@ -190,6 +203,7 @@ class ResearchLoop:
                     universe_index=self._universe_index,
                     start_date=experiment.guardrails.holdout_start,
                     end_date=experiment.backtest_end,
+                    frequency=experiment.rebalance_frequency,
                 )
 
                 self._guardrails.log_experiment(

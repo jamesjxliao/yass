@@ -5,11 +5,17 @@ import polars as pl
 from screener.plugins.base import Signal
 
 
+def _is_bad(x) -> bool:
+    """True if a reduction (mean/std) is None or NaN — NaN != 0 and NaN is not
+    None, so it slips past naive guards and would zero an entire factor column."""
+    return x is None or (isinstance(x, float) and x != x)
+
+
 def winsorize(series: pl.Series, n_std: float = 3.0) -> pl.Series:
     """Clip values to within n_std standard deviations of the mean."""
     mean = series.mean()
     std = series.std()
-    if std is None or std == 0 or mean is None:
+    if _is_bad(std) or std == 0 or _is_bad(mean):
         return series
     lower = mean - n_std * std
     upper = mean + n_std * std
@@ -21,7 +27,7 @@ def z_score_normalize(series: pl.Series, higher_is_better: bool = True) -> pl.Se
     clipped = winsorize(series)
     mean = clipped.mean()
     std = clipped.std()
-    if std is None or std == 0 or mean is None:
+    if _is_bad(std) or std == 0 or _is_bad(mean):
         return pl.Series([0.0] * len(series))
     z = (clipped - mean) / std
     if not higher_is_better:

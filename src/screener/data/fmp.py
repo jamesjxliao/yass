@@ -230,18 +230,18 @@ class FMPProvider:
             eps1, eps5 = inc[1].get("eps"), inc[5].get("eps")
             if rev0 and rev4:
                 row["rev_growth_current"] = rev0 / rev4 - 1
-            if eps4 and eps4 != 0:
+            if eps0 is not None and eps4 and eps4 != 0:
                 row["eps_growth_current"] = eps0 / eps4 - 1
             if rev1 and rev5:
                 row["rev_growth_prior"] = rev1 / rev5 - 1
-            if eps5 and eps5 != 0:
+            if eps1 is not None and eps5 and eps5 != 0:
                 row["eps_growth_prior"] = eps1 / eps5 - 1
         elif len(inc) >= 5:
             rev0, rev4 = inc[0].get("revenue"), inc[4].get("revenue")
             eps0, eps4 = inc[0].get("eps"), inc[4].get("eps")
             if rev0 and rev4:
                 row["rev_growth_current"] = rev0 / rev4 - 1
-            if eps4 and eps4 != 0:
+            if eps0 is not None and eps4 and eps4 != 0:
                 row["eps_growth_current"] = eps0 / eps4 - 1
         else:
             # Fall back to annual growth rates
@@ -285,7 +285,9 @@ class FMPProvider:
                 else:
                     continue
                 rows.append(self.enrich_profile_row(row, ticker))
-            except (httpx.HTTPError, httpx.HTTPStatusError):
+            except Exception:
+                # Broad: a malformed record (e.g. null EPS) must skip the one
+                # ticker, not abort the whole batch (monthly screen/trade).
                 logger.warning("Failed to fetch profile for %s", ticker)
         if not rows:
             return pl.DataFrame()
@@ -462,7 +464,8 @@ class CachedFMPProvider:
                     else:
                         return None
                     return self._fmp.enrich_profile_row(row, ticker)
-                except (httpx.HTTPError, httpx.HTTPStatusError):
+                except Exception:
+                    # Broad: one malformed record must not abort the whole batch.
                     logger.warning("Failed to fetch fundamentals for %s", ticker)
                     return None
 
@@ -531,9 +534,16 @@ class CachedFMPProvider:
                 "Split detected for %s — re-fetching adjusted prices",
                 ", ".join(split_tickers),
             )
-            self._cache.invalidate_prices(split_tickers)
             for ticker in split_tickers:
-                df = self._fmp.get_prices_single(ticker, start, end)
+                # Re-fetch the FULL cached span, not just this call's window —
+                # invalidate_prices deletes ALL rows for the ticker, so a window-
+                # only re-fetch would truncate (e.g.) 10yr of history to ~400 days
+                # and silently corrupt the price cache the backtest is tuned on.
+                cr = self._cache.get_cached_price_range(ticker)
+                ref_start = min(start, date.fromisoformat(cr[0])) if cr else start
+                ref_end = max(end, date.fromisoformat(cr[1])) if cr else end
+                self._cache.invalidate_prices([ticker])
+                df = self._fmp.get_prices_single(ticker, ref_start, ref_end)
                 if not df.is_empty():
                     self._cache.store_prices(df, source="fmp")
             result = self._cache.get_prices(tickers, str(start), str(end))

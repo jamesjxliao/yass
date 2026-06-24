@@ -71,10 +71,18 @@ class UniverseManager:
         else:
             as_of = as_of_date.isoformat()
             result = self._cache.to_polars(
+                # `removed_date <= added_date` marks a corrupt row from a ticker
+                # that LEFT and RE-JOINED the index (the builder paired a later
+                # add with an earlier remove). Such a row is unsatisfiable for
+                # every as_of, silently dropping a real member (EQT, PCG, DD/DOW,
+                # SNDK, FOX/FOXA...) for ALL dates — survivorship bias. Treat the
+                # spurious removed_date as NULL (active from added_date onward).
                 """SELECT ticker FROM universe_membership
                    WHERE index_name = ?
                      AND added_date <= ?
-                     AND (removed_date IS NULL OR removed_date > ?)""",
+                     AND (removed_date IS NULL
+                          OR removed_date <= added_date
+                          OR removed_date > ?)""",
                 [index, as_of, as_of],
             )
 

@@ -44,6 +44,7 @@ class PipelineConfig:
         max_per_sector: int = 0,
         position_stop_loss: float = 0.0,
         hold_bonus: float = 0.0,
+        weighting: str = "equal",
     ):
         self.filters = filters
         self.signals = signals
@@ -53,6 +54,15 @@ class PipelineConfig:
         self.max_per_sector = max_per_sector
         self.position_stop_loss = position_stop_loss
         self.hold_bonus = hold_bonus
+        # Validate eagerly at load (mirrors load_signals' fail-fast policy) so a
+        # typo'd mode raises here, not after a full screen/network round-trip.
+        from screener.engine.weighting import VALID_MODES
+
+        if weighting not in VALID_MODES:
+            raise ValueError(
+                f"Unknown weighting {weighting!r}. Valid: {VALID_MODES}"
+            )
+        self.weighting = weighting
 
     @classmethod
     def from_yaml(cls, path: Path) -> PipelineConfig:
@@ -62,9 +72,12 @@ class PipelineConfig:
             filters=data.get("filters", []),
             signals=data.get("signals", []),
             universe=data.get("universe", "sp500"),
-            top_n=data.get("top_n", 20),
-            rebalance_frequency=data.get("rebalance_frequency", "monthly"),
-            max_per_sector=data.get("max_per_sector", 0),
-            position_stop_loss=data.get("position_stop_loss", 0.0),
-            hold_bonus=data.get("hold_bonus", 0.0),
+            # `or default` so a present-but-empty YAML scalar (`top_n:` → None)
+            # falls back to the default instead of flowing None into the pipeline.
+            top_n=data.get("top_n") or 20,
+            rebalance_frequency=data.get("rebalance_frequency") or "monthly",
+            max_per_sector=data.get("max_per_sector") or 0,
+            position_stop_loss=data.get("position_stop_loss") or 0.0,
+            hold_bonus=data.get("hold_bonus") if data.get("hold_bonus") is not None else 0.0,
+            weighting=data.get("weighting") or "equal",
         )

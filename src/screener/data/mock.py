@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import random
 from datetime import date, timedelta
 
@@ -24,7 +25,7 @@ class MockProvider:
     def get_fundamentals(self, tickers: list[str]) -> pl.DataFrame:
         rows = []
         for ticker in tickers:
-            seed = hash(ticker) % 10000
+            seed = int(hashlib.md5(ticker.encode()).hexdigest(), 16) % 10000
             rng = random.Random(seed)
             rows.append({
                 "ticker": ticker,
@@ -55,7 +56,7 @@ class MockProvider:
     def get_prices(self, tickers: list[str], start: date, end: date) -> pl.DataFrame:
         rows = []
         for ticker in tickers:
-            seed = hash(ticker) % 10000
+            seed = int(hashlib.md5(ticker.encode()).hexdigest(), 16) % 10000
             rng = random.Random(seed)
             price = rng.uniform(20.0, 500.0)
             current = start

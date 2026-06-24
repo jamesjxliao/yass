@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import date
 
 import polars as pl
@@ -9,6 +10,8 @@ from screener.data.fmp import _FIELD_MAP
 from screener.data.pit import PITQuery
 from screener.data.provider import DataProvider
 from screener.data.universe import UniverseManager
+
+logger = logging.getLogger(__name__)
 
 # Derive PIT fields from the FMP field mapping (single source of truth)
 PIT_FIELDS = list(_FIELD_MAP.values())
@@ -56,7 +59,10 @@ class PITDataServer:
                           ) AS avg_vol_20d
                    FROM price_cache
                    WHERE ticker IN (SELECT UNNEST(?::VARCHAR[]))
-                     AND date <= ?::DATE
+                     -- strictly before rebalance, matching enrich_with_price_data's
+                     -- sma/momentum/vol cutoff so all screening columns share one
+                     -- as-of semantics (#20). Execution still enters at >= rebal.
+                     AND date < ?::DATE
                )
                SELECT ticker, close, avg_vol_20d AS avg_volume_20d
                FROM recent WHERE rn = 1""",
@@ -125,5 +131,15 @@ class PITDataServer:
                     df = df.join(sectors, on="ticker", how="left")
                 return df
 
-        # Fallback: use provider directly (current data, not PIT-correct)
+            # PIT data EXISTS but no snapshot qualifies for this batch/as_of (the
+            # date predates coverage). Do NOT fall back to live get_fundamentals —
+            # that serves CURRENT data into a past rebalance = lookahead. Return
+            # empty so the backtest skips this period instead of cheating.
+            logger.warning(
+                "No PIT fundamentals as of %s for this batch — skipping period "
+                "(no live fallback during backtest to avoid lookahead).", as_of_date
+            )
+            return pl.DataFrame()
+
+        # No PIT data at all (e.g. live screen on a fresh cache): current data ok.
         return self._provider.get_fundamentals(tickers)

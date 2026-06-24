@@ -18,7 +18,7 @@ class PITQuery:
         result = self._cache.to_polars(
             """SELECT value FROM pit_snapshots
                WHERE ticker = ? AND field = ? AND observed_at <= ?
-               ORDER BY observed_at DESC LIMIT 1""",
+               ORDER BY observed_at DESC, report_date DESC LIMIT 1""",
             [ticker, field, as_of_date.isoformat()],
         )
         if result.is_empty():
@@ -43,7 +43,7 @@ class PITQuery:
             """SELECT ticker, field, value,
                       ROW_NUMBER() OVER (
                           PARTITION BY ticker, field
-                          ORDER BY observed_at DESC
+                          ORDER BY observed_at DESC, report_date DESC
                       ) AS rn
                FROM pit_snapshots
                WHERE ticker IN (SELECT UNNEST(?::VARCHAR[]))

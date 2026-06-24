@@ -22,18 +22,44 @@ class RebalanceOrder:
 TOLERANCE = 0.05
 
 
+def target_value_for(
+    ticker: str,
+    equity: float,
+    target_weights: dict[str, float] | None,
+    n_tickers: int,
+) -> float:
+    """Dollar target for one ticker.
+
+    Weighted by ``target_weights[ticker]`` when provided; otherwise equal-weight
+    ``equity / n_tickers``. Shared by ``compute_rebalance_orders`` (the order
+    preview) and every broker's Phase-2 buy recompute, so the previewed sizing
+    and the executed sizing can never diverge.
+    """
+    if target_weights is not None and ticker in target_weights:
+        return equity * target_weights[ticker]
+    return equity / n_tickers if n_tickers else 0.0
+
+
 def compute_rebalance_orders(
     target_tickers: list[str],
     equity: float,
     current: dict[str, float],
+    target_weights: dict[str, float] | None = None,
 ) -> list[RebalanceOrder]:
-    """Compute equal-weight rebalance orders with 5% tolerance band.
+    """Compute rebalance orders with a 5% tolerance band.
 
     Shared across all brokers. Broker-specific methods fetch equity/positions
     and delegate here.
+
+    target_weights: optional {ticker: weight} (weights sum to ~1) for non-equal
+        sizing (e.g. inverse-vol). When None, falls back to equal weight 1/N.
+        The per-ticker target value and its tolerance band both scale with the
+        ticker's own weight.
     """
-    target_weight = 1.0 / len(target_tickers) if target_tickers else 0
-    target_value = equity * target_weight
+    n = len(target_tickers)
+
+    def target_value_of(ticker: str) -> float:
+        return target_value_for(ticker, equity, target_weights, n)
 
     target_set = set(target_tickers)
     current_set = set(current.keys())
@@ -46,6 +72,7 @@ def compute_rebalance_orders(
         ))
 
     for ticker in current_set & target_set:
+        target_value = target_value_of(ticker)
         diff = current[ticker] - target_value
         if diff > target_value * TOLERANCE:
             orders.append(RebalanceOrder(
@@ -53,6 +80,7 @@ def compute_rebalance_orders(
             ))
 
     for ticker in target_set:
+        target_value = target_value_of(ticker)
         current_value = current.get(ticker, 0)
         diff = target_value - current_value
         if diff > target_value * TOLERANCE:
@@ -96,12 +124,15 @@ class AlpacaBroker:
         }
 
     def compute_rebalance_orders(
-        self, target_tickers: list[str], account: dict | None = None
+        self, target_tickers: list[str], account: dict | None = None,
+        target_weights: dict[str, float] | None = None,
     ) -> list[RebalanceOrder]:
         if account is None:
             account = self.get_account()
         current = self.get_positions()
-        return compute_rebalance_orders(target_tickers, account["equity"], current)
+        return compute_rebalance_orders(
+            target_tickers, account["equity"], current, target_weights,
+        )
 
     def cancel_open_orders(self) -> int:
         """Cancel all open orders and wait for holds to clear."""
@@ -195,12 +226,16 @@ class AlpacaBroker:
         orders: list[RebalanceOrder],
         dry_run: bool = False,
         stop_loss_pct: float = 0.0,
+        target_weights: dict[str, float] | None = None,
     ) -> list[RebalanceOrder]:
         """Execute rebalance orders in two phases.
 
         Phase 1: Cancel open orders, execute sells, wait for fills.
         Phase 2: Recompute buy amounts from actual cash, then execute buys.
         Stops are placed for all positions after buys complete.
+
+        target_weights: optional {ticker: weight} for non-equal sizing; the
+            Phase-2 recompute scales each buy by its weight (None ⇒ equal 1/N).
         """
         sells = [o for o in orders if o.side == "sell"]
         buys = [o for o in orders if o.side == "buy"]
@@ -237,6 +272,17 @@ class AlpacaBroker:
         if sells:
             logger.info("Waiting for %d sell orders to fill...", len(sells))
             self._wait_for_fills(sells)
+            # A broker can ACCEPT a sell then asynchronously reject/cancel it; it
+            # leaves the OPEN set so _wait_for_fills treats it as done, but the
+            # position never cleared. Re-query positions: any full-exit name still
+            # held means the sell did NOT fill → mark failed so the abort fires
+            # (otherwise Phase-2 buys submit against cash that was never freed).
+            held = self.get_positions()
+            for o in sells:
+                is_exit = o.ticker not in target_tickers
+                if is_exit and not o.status.startswith("error") and o.ticker in held:
+                    o.status = "error: sell did not clear (still held)"
+                    logger.error("SELL %s — did not clear after wait", o.ticker)
 
         # Abort buys if any sells failed
         failed_sells = [o for o in sells if o.status.startswith("error")]
@@ -258,20 +304,30 @@ class AlpacaBroker:
             account = self.get_account()
             current = self.get_positions()
             all_target_tickers = list(set(current.keys()) | target_tickers)
-            target_value = account["equity"] / len(all_target_tickers) if all_target_tickers else 0
+            equity = account["equity"]
+            n_equal = len(all_target_tickers)
 
             logger.info(
-                "Cash available: $%.2f — target $%.2f per stock",
-                account["cash"], target_value,
+                "Cash available: $%.2f — sizing %d buys (%s)",
+                account["cash"], len(buys),
+                "inverse-vol" if target_weights else "equal-weight",
             )
+            cash_remaining = account["cash"]
             for order in buys:
                 current_value = current.get(order.ticker, 0)
+                target_value = target_value_for(
+                    order.ticker, equity, target_weights, n_equal
+                )
                 order.notional = max(target_value - current_value, 0)
+                # Never submit beyond available cash — defends against buying on
+                # margin/phantom cash if a sell silently failed to free funds.
+                order.notional = min(order.notional, max(cash_remaining, 0))
                 if order.notional < 1:
                     order.status = "skipped"
                     continue
                 try:
                     self._submit_order(order)
+                    cash_remaining -= order.notional
                 except Exception as e:
                     order.status = f"error: {e}"
                     logger.error("BUY %s $%.2f — FAILED: %s", order.ticker, order.notional, e)
