@@ -34,3 +34,5 @@ results/
 # coverage artifacts
 .coverage
 htmlcov/
+data/*.bak*
+data/*.duckdb.bak*
