@@ -22,6 +22,16 @@ def test_z_score_basic():
     assert abs(z.std() - 1.0) < 0.1
 
 
+def test_z_score_nan_zeros_only_offending_row():
+    """A single NaN must zero only its own row, not poison mean/std and zero the
+    whole factor column (#14)."""
+    z = z_score_normalize(pl.Series([1.0, 2.0, 3.0, float("nan"), 5.0]))
+    vals = z.to_list()
+    assert z.std() > 0           # column NOT zeroed
+    assert vals[3] == 0.0        # the NaN row is neutral
+    assert vals[4] == max(vals)  # ranking preserved (5.0 is highest)
+
+
 def test_z_score_higher_is_better_false():
     s = pl.Series([1.0, 2.0, 3.0, 4.0, 5.0])
     z_high = z_score_normalize(s, higher_is_better=True)

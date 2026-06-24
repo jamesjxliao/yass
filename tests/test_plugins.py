@@ -3,13 +3,22 @@ from __future__ import annotations
 from pathlib import Path
 
 import polars as pl
+import pytest
 from screener.plugins.base import Filter, Signal
+from screener.plugins.loader import load_signals
 from screener.plugins.registry import discover_filters, discover_signals
 
 from tests.test_data.fixtures import make_fundamentals
 
 FILTERS_DIR = Path(__file__).parent.parent / "filters"
 SIGNALS_DIR = Path(__file__).parent.parent / "signals"
+
+
+def test_load_signals_zero_total_weight_raises():
+    """All-zero weights must raise, not silently yield an order-dependent,
+    meaningless ranking (#26)."""
+    with pytest.raises(ValueError):
+        load_signals([{"name": "piotroski_f", "weight": 0.0}], SIGNALS_DIR)
 
 
 def test_discover_filters():

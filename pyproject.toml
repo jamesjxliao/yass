@@ -32,12 +32,36 @@ scikit-learn = "^1.5"
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"
 ruff = "^0.5"
+pytest-cov = "^7.1.0"
 
 [tool.poetry.group.backtest]
 optional = true
 
 [tool.poetry.group.backtest.dependencies]
 vectorbt = ">=0.26"
+
+[tool.coverage.run]
+source = ["src/screener", "signals", "filters"]
+# Omit the integration/IO/presentation layers that are exercised manually or via
+# the live CLI, not unit tests — so the gate measures the testable CORE LOGIC
+# (engine, backtest, trading, signals, data). These remain known gaps to cover
+# with integration tests over time (esp. cli.py — the frequency bug lived there).
+omit = [
+    "*/__init__.py",
+    "src/screener/cli.py",            # Typer command wiring + I/O orchestration
+    "src/screener/evaluation/charts.py",  # matplotlib plotting
+    "src/screener/data/earnings.py",  # SEC EDGAR network fetcher
+    "src/screener/research/loop.py",  # autoresearch orchestration (integration)
+]
+
+[tool.coverage.report]
+# Deterministic coverage gate over core logic (currently ~61%). Set a little
+# below current as a ratchet that catches gross regressions without being brittle
+# (also absorbs the public-repo difference, which lacks the experimental hedge
+# model). Raise as coverage improves; never lower without reason.
+fail_under = 58
+skip_covered = false
+exclude_lines = ["pragma: no cover", "if __name__ == .__main__.:", "raise NotImplementedError"]
 
 [tool.ruff]
 target-version = "py312"

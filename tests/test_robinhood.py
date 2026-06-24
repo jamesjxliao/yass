@@ -102,6 +102,30 @@ class TestParsePositions:
 
         assert result["AAPL"].market_value == 2050.0
 
+    def test_null_last_trade_price_coalesces(self):
+        """A present-but-null last_trade_price must fall back to ext-hours/avg_cost,
+        not crash on float(None)."""
+        positions = [
+            {"symbol": "AAPL", "quantity": "10", "average_buy_price": "150.00"},
+        ]
+        quotes = {"AAPL": {"last_trade_price": None,
+                           "last_extended_hours_trade_price": "205.00"}}
+
+        result = RobinhoodBroker.parse_positions(positions, quotes)
+
+        assert result["AAPL"].market_value == 2050.0  # used ext-hours, did not crash
+
+    def test_zero_last_trade_price_coalesces_to_avg_cost(self):
+        """A present-but-zero quote must not yield market_value 0 (phantom re-buy)."""
+        positions = [
+            {"symbol": "AAPL", "quantity": "10", "average_buy_price": "150.00"},
+        ]
+        quotes = {"AAPL": {"last_trade_price": "0.0000"}}
+
+        result = RobinhoodBroker.parse_positions(positions, quotes)
+
+        assert result["AAPL"].market_value == 1500.0  # avg_cost, not 0
+
 
 class TestComputeRebalanceOrders:
 

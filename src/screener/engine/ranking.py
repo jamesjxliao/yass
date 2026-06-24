@@ -5,17 +5,18 @@ import polars as pl
 from screener.plugins.base import Signal
 
 
-def _is_bad(x) -> bool:
-    """True if a reduction (mean/std) is None or NaN — NaN != 0 and NaN is not
-    None, so it slips past naive guards and would zero an entire factor column."""
-    return x is None or (isinstance(x, float) and x != x)
-
-
 def winsorize(series: pl.Series, n_std: float = 3.0) -> pl.Series:
-    """Clip values to within n_std standard deviations of the mean."""
+    """Clip values to within n_std standard deviations of the mean.
+
+    NaN is converted to null first so a single NaN can't poison mean/std (which
+    would otherwise make them NaN — NaN != 0 and NaN is not None, slipping past
+    the guards — and zero the entire factor column). Null rows are skipped by the
+    aggregations and pass through to be neutralized at the z-score fill.
+    """
+    series = series.fill_nan(None)
     mean = series.mean()
     std = series.std()
-    if _is_bad(std) or std == 0 or _is_bad(mean):
+    if std is None or std == 0 or mean is None:
         return series
     lower = mean - n_std * std
     upper = mean + n_std * std
@@ -23,11 +24,12 @@ def winsorize(series: pl.Series, n_std: float = 3.0) -> pl.Series:
 
 
 def z_score_normalize(series: pl.Series, higher_is_better: bool = True) -> pl.Series:
-    """Winsorize then z-score normalize. NaN filled with 0 (neutral)."""
-    clipped = winsorize(series)
+    """Winsorize then z-score normalize. NaN/null filled with 0 (neutral) — only
+    the offending rows, not the whole column."""
+    clipped = winsorize(series)  # NaN already → null inside winsorize
     mean = clipped.mean()
     std = clipped.std()
-    if _is_bad(std) or std == 0 or _is_bad(mean):
+    if std is None or std == 0 or mean is None:
         return pl.Series([0.0] * len(series))
     z = (clipped - mean) / std
     if not higher_is_better:

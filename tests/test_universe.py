@@ -41,3 +41,18 @@ def test_get_active_as_of_date(cache: CacheManager):
     active = um.get_active("sp500", as_of_date=date(2024, 1, 1))
     assert "OLD" not in active
     assert "NEW" in active
+
+
+def test_get_active_inverted_membership_row(cache: CacheManager):
+    """A row where removed_date <= added_date (a ticker that left and re-joined;
+    the builder paired a later add with an earlier remove) must still be active
+    from added_date onward, not silently dropped for all dates (#4)."""
+    um = UniverseManager(cache)
+    cache._conn.execute(
+        """INSERT INTO universe_membership (ticker, index_name, added_date, removed_date)
+           VALUES ('EQT', 'sp500', '2022-10-03', '2018-11-13')"""
+    )
+    # before the real (re-)add date → not active
+    assert "EQT" not in um.get_active("sp500", as_of_date=date(2020, 1, 1))
+    # after it → active (the spurious earlier removed_date is treated as NULL)
+    assert "EQT" in um.get_active("sp500", as_of_date=date(2023, 1, 1))

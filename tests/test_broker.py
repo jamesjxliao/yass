@@ -136,6 +136,57 @@ def test_execute_orders_phase2_respects_target_weights():
     assert by_ticker["HIGHVOL"].notional == pytest.approx(30000, abs=1)
 
 
+def test_uncleared_sell_aborts_buys():
+    """A full-exit sell that didn't clear (still held after the wait) must mark
+    the sell failed and abort buys — else Phase-2 buys spend cash never freed."""
+    client = MagicMock()
+    client.cancel_orders.return_value = []
+    client.get_orders.return_value = []  # _wait_for_fills sees no OPEN orders → "filled"
+    client.get_account.return_value = _mock_account(equity=100000, cash=0)
+    # OLD is STILL HELD after the wait → the sell was accepted but never cleared
+    client.get_all_positions.return_value = [_mock_position("OLD", 10, 5000, 500)]
+
+    broker = _make_broker(client)
+    orders = [
+        RebalanceOrder(ticker="OLD", side="sell", notional=5000),  # full exit
+        RebalanceOrder(ticker="NEW", side="buy", notional=5000),
+    ]
+    result = broker.execute_orders(orders, dry_run=False)
+
+    status = {o.ticker: o.status for o in result}
+    assert status["NEW"] == "aborted"
+    assert status["OLD"].startswith("error")
+    # no buy order may have been submitted
+    submitted_buys = [
+        c[0][0] for c in client.submit_order.call_args_list
+        if c[0][0].side.value == "buy"
+    ]
+    assert not submitted_buys
+
+
+def test_phase2_buys_clamped_to_cash():
+    """Buys must never exceed available cash, even if equity-based targets are
+    larger (defends against buying on margin if a sell didn't free funds)."""
+    client = MagicMock()
+    client.cancel_orders.return_value = []
+    client.get_orders.return_value = []
+    # $100k equity but only $5k actually available
+    client.get_account.return_value = _mock_account(equity=100000, cash=5000)
+    client.get_all_positions.return_value = []
+    client.get_positions.return_value = []
+
+    broker = _make_broker(client)
+    orders = [
+        RebalanceOrder(ticker="A", side="buy", notional=1),
+        RebalanceOrder(ticker="B", side="buy", notional=1),
+    ]  # equal weight → each target ~$50k, far over the $5k cash
+    broker.execute_orders(orders, dry_run=False)
+
+    submitted = [c[0][0] for c in client.submit_order.call_args_list]
+    total_buys = sum(o.notional for o in submitted if o.side.value == "buy")
+    assert total_buys <= 5000 + 1  # clamped to available cash
+
+
 def test_stops_placed_for_all_positions():
     """Stop-losses should be placed for every held position after rebalance."""
     client = MagicMock()

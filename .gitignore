@@ -30,3 +30,7 @@ results/
 
 # OS
 .DS_Store
+
+# coverage artifacts
+.coverage
+htmlcov/

@@ -259,6 +259,28 @@ class TestExecuteOrdersStopLoss:
         broker._instrument_cache = {"AAPL": 1129, "MSFT": 1130}
         return broker
 
+    def test_buys_clamped_to_available_cash(self):
+        """eToro Phase-2 buys must not exceed available cash even if the equity-
+        based target is larger (just-closed cash may not have settled)."""
+        from screener.trading.broker import RebalanceOrder
+
+        broker = self._make_broker()
+        broker.get_account = MagicMock(return_value={
+            "equity": 100000, "cash": 100, "buying_power": 100, "portfolio_value": 100,
+        })
+        broker.cancel_open_orders = MagicMock(return_value=0)
+        broker.get_positions_detailed = MagicMock(return_value=[])
+        broker.resolve_positions = MagicMock(return_value={})
+        broker._get_rate = MagicMock(return_value=None)
+        broker._open_position = MagicMock(return_value={"orderForOpen": {}})
+
+        # 1 target → equal-weight target = full $100k equity, but cash is only $100
+        orders = [RebalanceOrder(ticker="AAPL", side="buy", notional=1)]
+        broker.execute_orders(orders, dry_run=False, stop_loss_pct=0.0)
+
+        notional = broker._open_position.call_args[0][1]  # (iid, notional, ...)
+        assert notional <= 100
+
     def test_buy_skipped_when_rate_unavailable(self):
         from screener.trading.broker import RebalanceOrder
 
