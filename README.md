@@ -80,13 +80,9 @@ The repo ships with 9 signals — use them as-is or adjust weights in `config/ex
 | `momentum_12m` | 12-month price momentum |
 | `low_leverage_growth` | Growth funded by cash flow, not debt |
 | `quality_score` | Composite quality: ROE, ROIC, ROA, R&D efficiency, low debt |
-| `quality_momentum` | Momentum weighted by ROE + ROIC quality |
 | `margin_expansion` | Gross + operating margin improvement YoY |
 | `efficiency_acceleration` | Revenue/EPS growth acceleration + SGA leverage |
 | `value_composite` | Multi-factor value: earnings yield, FCF yield, EV/sales |
-| `earnings_growth` | Earnings growth rate |
-| `analyst_momentum` | Rising analyst buy consensus |
-| `earnings_surprise` | Post-earnings drift from standardized earnings surprise |
 | `quality_at_discount` | Beaten-down quality stocks with FCF + low debt |
 
 ## Configuration
