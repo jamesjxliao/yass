@@ -21,3 +21,18 @@ def test_unknown_weighting_raises(tmp_path):
     p.write_text("weighting: made_up\nsignals: []\nfilters: []\n")
     with pytest.raises(ValueError):
         PipelineConfig.from_yaml(p)
+
+
+def test_backtest_kwargs_bundle_maps_frequency():
+    """backtest_kwargs() bundles the run_backtest knobs and maps the config's
+    rebalance_frequency onto run_backtest's `frequency` parameter."""
+    cfg = PipelineConfig(
+        filters=[], signals=[], rebalance_frequency="quarterly",
+        position_stop_loss=0.05, hold_bonus=1.0, weighting="equal",
+    )
+    assert cfg.backtest_kwargs() == {
+        "frequency": "quarterly",
+        "position_stop_loss": 0.05,
+        "hold_bonus": 1.0,
+        "weighting": "equal",
+    }

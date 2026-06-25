@@ -64,6 +64,21 @@ class PipelineConfig:
             )
         self.weighting = weighting
 
+    def backtest_kwargs(self) -> dict[str, Any]:
+        """The per-config knobs threaded into run_backtest / run_full_evaluation.
+
+        Bundled in one place so adding a new backtest knob is a single edit here
+        rather than a synchronized change across every call site — the class of
+        bug where `lab` once hardcoded frequency="monthly" and silently ignored
+        the config. (`rebalance_frequency` maps to run_backtest's `frequency`.)
+        """
+        return {
+            "frequency": self.rebalance_frequency,
+            "position_stop_loss": self.position_stop_loss,
+            "hold_bonus": self.hold_bonus,
+            "weighting": self.weighting,
+        }
+
     @classmethod
     def from_yaml(cls, path: Path) -> PipelineConfig:
         with open(path) as f:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import polars as pl
 
-from signals._normalize import minmax
+from signals._normalize import column
 
 
 class LowLeverageGrowthSignal:
@@ -25,24 +25,19 @@ class LowLeverageGrowthSignal:
 
         # Momentum component (growth)
         if "momentum_12m_return" in df.columns:
-            s = df["momentum_12m_return"].cast(pl.Float64).fill_null(0.0).fill_nan(0.0)
-            components.append(minmax(s))
+            components.append(column(df, "momentum_12m_return"))
 
         # Low leverage (lower net_debt_to_ebitda is better — invert)
         if "net_debt_to_ebitda" in df.columns:
-            s = df["net_debt_to_ebitda"].cast(pl.Float64).fill_null(0.0).fill_nan(0.0)
-            components.append(1.0 - minmax(s))
+            components.append(column(df, "net_debt_to_ebitda", invert=True))
 
         # Cash generation
         if "fcf_yield" in df.columns:
-            s = df["fcf_yield"].cast(pl.Float64).fill_null(0.0).fill_nan(0.0)
-            components.append(minmax(s))
+            components.append(column(df, "fcf_yield"))
 
         # Low capex intensity (lower is better — asset-light growth)
         if "capex_to_revenue" in df.columns:
-            s = df["capex_to_revenue"].cast(pl.Float64).fill_null(0.0).fill_nan(0.0)
-            s = s.clip(0.0, 0.5)
-            components.append(1.0 - minmax(s))
+            components.append(column(df, "capex_to_revenue", invert=True, clip=(0.0, 0.5)))
 
         if not components:
             return pl.Series([0.5] * len(df))

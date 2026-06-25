@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import polars as pl
 
-from signals._normalize import minmax
+from signals._normalize import column
 
 
 class QualitySignal:
@@ -16,24 +16,18 @@ class QualitySignal:
 
         for col in ("roe", "roic", "roa"):
             if col in df.columns:
-                s = df[col].cast(pl.Float64).fill_null(0.0).fill_nan(0.0)
-                components.append(minmax(s))
+                components.append(column(df, col))
 
         if "net_debt_to_ebitda" in df.columns:
-            s = df["net_debt_to_ebitda"].cast(pl.Float64).fill_null(0.0).fill_nan(0.0)
-            components.append(1.0 - minmax(s))
-
-        if "debt_to_equity" in df.columns and "net_debt_to_ebitda" not in df.columns:
-            s = df["debt_to_equity"].cast(pl.Float64).fill_null(0.0).fill_nan(0.0)
-            components.append(1.0 - minmax(s))
+            components.append(column(df, "net_debt_to_ebitda", invert=True))
+        elif "debt_to_equity" in df.columns:
+            components.append(column(df, "debt_to_equity", invert=True))
 
         if "rd_to_revenue" in df.columns:
-            s = df["rd_to_revenue"].cast(pl.Float64).fill_null(0.0).fill_nan(0.0).clip(0.0, 0.4)
-            components.append(minmax(s))
+            components.append(column(df, "rd_to_revenue", clip=(0.0, 0.4)))
 
         if "earnings_stability" in df.columns:
-            s = df["earnings_stability"].cast(pl.Float64).fill_null(0.5).fill_nan(0.5)
-            components.append(minmax(s))
+            components.append(column(df, "earnings_stability", fill=0.5))
 
         if not components:
             return pl.Series([0.5] * len(df))

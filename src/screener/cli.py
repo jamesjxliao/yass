@@ -7,6 +7,12 @@ from typing import Annotated
 import typer
 
 from screener.config import PipelineConfig, Settings
+from screener.research.harness import (
+    backtest_universe,
+    build_pipeline,
+    make_pit_server,
+    make_provider,
+)
 
 app = typer.Typer(help="Modular Quantitative Research Screener")
 
@@ -21,49 +27,21 @@ def _setup_logging(verbose: bool) -> None:
 
 
 def _make_provider(settings: Settings):
-    """Auto-select provider: CachedFMPProvider if API key set, else MockProvider."""
-    from screener.data.cache import CacheManager
-
-    cache = CacheManager(settings.db_path)
-
+    """Build the provider (via the shared harness) and echo the CLI selection."""
+    provider, cache = make_provider(settings)
     if settings.fmp_api_key:
-        from screener.data.fmp import CachedFMPProvider, FMPProvider
-
-        fmp = FMPProvider(settings.fmp_api_key)
-        provider = CachedFMPProvider(fmp, cache)
         typer.echo("Using FMP provider (cached)")
     else:
-        from screener.data.mock import MockProvider
-
-        provider = MockProvider()
         typer.echo("Using mock provider (set FMP_API_KEY in .env for real data)")
-
     return provider, cache
 
 
-def _build_pipeline(pipeline_config: PipelineConfig, settings: Settings, top_n: int | None = None):
-    """Build a ScreeningPipeline from config."""
-    from screener.engine.pipeline import ScreeningPipeline
-    from screener.plugins.loader import load_filters, load_signals
-
-    filters = load_filters(pipeline_config.filters, settings.filters_dir)
-    signals = load_signals(pipeline_config.signals, settings.signals_dir)
-    return ScreeningPipeline(
-        filters=filters,
-        signals_with_weights=signals,
-        top_n=top_n or pipeline_config.top_n,
-        max_per_sector=pipeline_config.max_per_sector,
-    )
-
-
-def _make_pit_server(provider, cache, pipeline_config: PipelineConfig):
-    """Create PIT server with universe sync."""
-    from screener.backtest.pit_server import PITDataServer
-    from screener.data.universe import UniverseManager
-
-    um = UniverseManager(cache)
-    um.sync(provider, pipeline_config.universe)
-    return PITDataServer(provider, cache, um)
+# The pipeline/PIT-server/universe setup now lives in screener.research.harness
+# (the canonical, CLI-agnostic research API). These aliases preserve the
+# historical ``_``-prefixed names that the experiment scripts import.
+_build_pipeline = build_pipeline
+_make_pit_server = make_pit_server
+_backtest_universe = backtest_universe
 
 
 def _resolve_target_weights(result, weighting: str, picks: list) -> dict:
@@ -84,27 +62,6 @@ def _resolve_target_weights(result, weighting: str, picks: list) -> dict:
         for t in picks:
             typer.echo(f"  {t:<6} {target_weights.get(t, 0):>6.1%}")
     return target_weights
-
-
-def _backtest_universe(cache, provider, universe: str) -> list[str]:
-    """Full PIT membership (active + departed) for survivorship-correct backtest price_data.
-
-    `get_universe` returns only *current* members, so departed names the screener
-    selects can't be priced — the backtest silently trades survivors and the Sharpe
-    is inflated (~+0.03 for sp500). Pricing the full historical membership fixes it.
-    Falls back to current constituents when membership history isn't loaded (e.g. mock).
-    """
-    try:
-        rows = cache.to_polars(
-            "SELECT DISTINCT ticker FROM universe_membership WHERE index_name = ?",
-            [universe],
-        )
-        members = [t for t in rows["ticker"].to_list() if "/" not in t]
-        if members:
-            return members
-    except Exception:
-        pass
-    return provider.get_universe(universe)
 
 
 @app.command()
@@ -220,10 +177,7 @@ def backtest(
         universe_index=pipeline_config.universe,
         start_date=start,
         end_date=end,
-        frequency=pipeline_config.rebalance_frequency,
-        position_stop_loss=pipeline_config.position_stop_loss,
-        hold_bonus=pipeline_config.hold_bonus,
-        weighting=pipeline_config.weighting,
+        **pipeline_config.backtest_kwargs(),
     )
 
     typer.echo(metrics.summary())
@@ -408,10 +362,7 @@ def evaluate(
         start_date=start,
         end_date=end,
         monte_carlo_iterations=monte_carlo,
-        position_stop_loss=pipeline_config.position_stop_loss,
-        hold_bonus=pipeline_config.hold_bonus,
-        weighting=pipeline_config.weighting,
-        frequency=pipeline_config.rebalance_frequency,
+        **pipeline_config.backtest_kwargs(),
     )
 
     typer.echo(report.summary())
@@ -513,32 +464,13 @@ def lab(
     """Fast signal evaluation for autonomous research. Backtest + metrics only."""
     _setup_logging(verbose)
 
-    from screener.backtest.runner import run_backtest
-
-    settings = Settings()
-    pipeline_config = PipelineConfig.from_yaml(config)
-    pipeline = _build_pipeline(pipeline_config, settings)
-
-    provider, cache = _make_provider(settings)
-    pit_server = _make_pit_server(provider, cache, pipeline_config)
+    from screener.research.harness import build_research_context, run_variation
 
     start = date.fromisoformat(start_date)
     end = date.fromisoformat(end_date)
-    tickers = _backtest_universe(cache, provider, pipeline_config.universe)
-    price_data = cache.get_prices(tickers, str(start - timedelta(days=400)), str(end))
-
-    metrics = run_backtest(
-        pipeline=pipeline,
-        pit_server=pit_server,
-        price_data=price_data,
-        universe_index=pipeline_config.universe,
-        start_date=start,
-        end_date=end,
-        frequency=pipeline_config.rebalance_frequency,
-        position_stop_loss=pipeline_config.position_stop_loss,
-        hold_bonus=pipeline_config.hold_bonus,
-        weighting=pipeline_config.weighting,
-    )
+    ctx = build_research_context(config, start, end, provider_factory=_make_provider)
+    cache = ctx.cache
+    metrics = run_variation(ctx)
 
     # Machine-readable output for autonomous agent parsing
     typer.echo("---")
