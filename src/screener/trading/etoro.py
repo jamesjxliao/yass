@@ -229,16 +229,18 @@ class EtoroBroker:
 
     def get_account(self) -> dict:
         """Get account info: equity, cash, portfolio value."""
-        resp = self._client.get(self._info_url("pnl"), headers=self._headers())
-        resp.raise_for_status()
+        resp = self._request_with_retry(
+            "get", self._info_url("pnl"), headers=self._headers()
+        )
         data = resp.json()
         portfolio = data.get("clientPortfolio", data)
         return compute_equity(portfolio)
 
     def _get_pnl_positions(self) -> list[dict]:
         """Fetch positions from the PnL endpoint (includes unrealizedPnL)."""
-        resp = self._client.get(self._info_url("pnl"), headers=self._headers())
-        resp.raise_for_status()
+        resp = self._request_with_retry(
+            "get", self._info_url("pnl"), headers=self._headers()
+        )
         data = resp.json()
         portfolio = data.get("clientPortfolio", data)
         return portfolio.get("positions", [])
@@ -359,8 +361,9 @@ class EtoroBroker:
 
     def cancel_open_orders(self) -> int:
         """Cancel all pending open orders. Returns number cancelled."""
-        resp = self._client.get(self._portfolio_url(), headers=self._headers())
-        resp.raise_for_status()
+        resp = self._request_with_retry(
+            "get", self._portfolio_url(), headers=self._headers()
+        )
         data = resp.json()
         portfolio = data.get("clientPortfolio", data)
 
@@ -380,12 +383,12 @@ class EtoroBroker:
 
     def _get_rate(self, instrument_id: int) -> float | None:
         try:
-            resp = self._client.get(
+            resp = self._request_with_retry(
+                "get",
                 f"{BASE_URL}/market-data/instruments/rates",
                 params={"instrumentIds": str(instrument_id)},
                 headers=self._headers(),
             )
-            resp.raise_for_status()
             data = resp.json()
             for rate in data.get("rates", []):
                 if rate.get("instrumentID") == instrument_id:

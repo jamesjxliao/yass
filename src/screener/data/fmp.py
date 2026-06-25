@@ -230,18 +230,21 @@ class FMPProvider:
             eps1, eps5 = inc[1].get("eps"), inc[5].get("eps")
             if rev0 and rev4:
                 row["rev_growth_current"] = rev0 / rev4 - 1
-            if eps0 is not None and eps4 and eps4 != 0:
+            # Require a POSITIVE year-ago base: with a negative eps4 the ratio
+            # is sign-flipped and meaningless (a loss → profit recovery reads
+            # as large negative growth), so leave it null instead.
+            if eps0 is not None and eps4 and eps4 > 0:
                 row["eps_growth_current"] = eps0 / eps4 - 1
             if rev1 and rev5:
                 row["rev_growth_prior"] = rev1 / rev5 - 1
-            if eps1 is not None and eps5 and eps5 != 0:
+            if eps1 is not None and eps5 and eps5 > 0:
                 row["eps_growth_prior"] = eps1 / eps5 - 1
         elif len(inc) >= 5:
             rev0, rev4 = inc[0].get("revenue"), inc[4].get("revenue")
             eps0, eps4 = inc[0].get("eps"), inc[4].get("eps")
             if rev0 and rev4:
                 row["rev_growth_current"] = rev0 / rev4 - 1
-            if eps0 is not None and eps4 and eps4 != 0:
+            if eps0 is not None and eps4 and eps4 > 0:
                 row["eps_growth_current"] = eps0 / eps4 - 1
         else:
             # Fall back to annual growth rates
@@ -474,6 +477,7 @@ class CachedFMPProvider:
             with ThreadPoolExecutor(max_workers=6) as pool:
                 results = pool.map(_fetch_one, uncached_tickers)
 
+            failed: list[str] = []
             for ticker, row in zip(uncached_tickers, results):
                 if row is not None:
                     self._cache.get_or_fetch(
@@ -485,6 +489,17 @@ class CachedFMPProvider:
                     if row.get("sector"):
                         self._cache.store_sector(ticker, row["sector"])
                     cached_rows.append(row)
+                else:
+                    failed.append(ticker)
+
+            if failed:
+                # A transient failure silently drops a name from the screening
+                # universe (it's absent, not zeroed). Surface the count + tickers
+                # so a degraded monthly fetch is visible in CI logs, not buried.
+                logger.warning(
+                    "Fundamentals: %d/%d failed to fetch: %s",
+                    len(failed), len(uncached_tickers), ", ".join(failed),
+                )
         else:
             logger.info("Fundamentals: all %d cached", len(tickers))
 

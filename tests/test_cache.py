@@ -77,6 +77,21 @@ def test_bulk_store_pit_snapshots(cache: CacheManager):
     assert result2["value"][0] == 0.28
 
 
+def test_bulk_store_pit_snapshots_tolerates_timestamp_observed_at(cache: CacheManager):
+    """Regression: the bulk path used a strict date-only parse on observed_at,
+    so a caller passing a full timestamp (the granularity record_pit_snapshot
+    writes) would crash the entire load. It must now accept both forms.
+    """
+    snapshots = [
+        ("AAPL", "roe", 0.25, "2024-03-31", "fmp_qkm", "2024-05-15 12:30:45.123456"),
+        ("MSFT", "roe", 0.30, "2024-03-31", "fmp_qkm", "2024-05-15"),
+    ]
+    cache.bulk_store_pit_snapshots(snapshots)  # must NOT raise
+
+    result = cache.to_polars("SELECT COUNT(*) as cnt FROM pit_snapshots")
+    assert result["cnt"][0] == 2
+
+
 def test_bulk_store_pit_snapshots_empty(cache: CacheManager):
     """Bulk insert with empty list should be a no-op."""
     cache.bulk_store_pit_snapshots([])

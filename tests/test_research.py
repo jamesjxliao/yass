@@ -23,6 +23,36 @@ def test_guardrails_experiment_budget(cache: CacheManager):
     assert not g.check_experiment_budget("test_exp", max_experiments=2)
 
 
+def test_loop_per_variation_budget_uses_absolute_cap(cache: CacheManager):
+    """Regression: ResearchLoop's per-variation budget re-check must gate on the
+    ABSOLUTE max_experiments, not ``max - var_idx``. Each completed variation
+    logs one row, so ``count`` already grows with var_idx; subtracting var_idx
+    too double-counts and aborted a fresh experiment at ~max/2 variations.
+
+    This mirrors loop.py's per-iteration gate + log_experiment accounting.
+    """
+    g = Guardrails(cache)
+    max_experiments = 6
+    metrics = BacktestMetrics(
+        sharpe_ratio=1.0, max_drawdown=-0.1, cagr=0.1,
+        calmar_ratio=1.0, sample_size=50, psr=0.9,
+        walk_forward_consistency=0.8, total_return=0.3,
+    )
+
+    completed = 0
+    for var_idx in range(max_experiments):
+        # Fixed code: absolute cap (NOT max_experiments - var_idx).
+        if not g.check_experiment_budget("exp", max_experiments):
+            break
+        g.log_experiment(f"id{var_idx}", "exp", {}, metrics)
+        completed += 1
+
+    # All variations run — the old `max - var_idx` formula stopped at 3 (~max/2).
+    assert completed == max_experiments
+    # And the cap is still enforced: a 7th variation is refused.
+    assert not g.check_experiment_budget("exp", max_experiments)
+
+
 def test_guardrails_holdout_tracking(cache: CacheManager):
     g = Guardrails(cache)
     assert g.check_holdout_usage("test_exp") == 0

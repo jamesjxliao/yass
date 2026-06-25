@@ -207,7 +207,8 @@ def _generate_monthly_dates(start: date, end: date) -> list[date]:
 
 def _run_single_mc_iteration(args: tuple) -> float:
     """Run one Monte Carlo iteration. Designed for parallel execution."""
-    seed, top_n, rebalance_dates, tickers_by_date, prices_by_period, cost = args
+    (seed, top_n, rebalance_dates, tickers_by_date, prices_by_period, cost,
+     periods_per_year) = args
     rng = random.Random(seed)
     periodic_returns = []
 
@@ -230,7 +231,7 @@ def _run_single_mc_iteration(args: tuple) -> float:
         else:
             periodic_returns.append(0.0)
 
-    return compute_sharpe(pl.Series(periodic_returns))
+    return compute_sharpe(pl.Series(periodic_returns), periods_per_year)
 
 
 def run_monte_carlo(
@@ -299,13 +300,17 @@ def run_monte_carlo(
             ))
 
     cost = transaction_cost_bps / 10_000 * 2
+    # Annualise random portfolios on the SAME cadence as the strategy Sharpe
+    # they're compared against — else a non-monthly config makes the null and
+    # the strategy apples-to-oranges and corrupts the significance percentile.
+    periods_per_year = {"weekly": 52, "quarterly": 4}.get(frequency, 12)
 
     # Run iterations in parallel
     from concurrent.futures import ThreadPoolExecutor
 
     args = [
         (42 + i, pipeline.top_n, rebalance_dates, tickers_by_date,
-         prices_by_period, cost)
+         prices_by_period, cost, periods_per_year)
         for i in range(n_iterations)
     ]
 
@@ -583,6 +588,7 @@ def run_regime_analysis(
 ) -> RegimeResult:
     """Analyze strategy performance in bull/flat/bear market regimes."""
     rebalance_dates = _generate_rebalance_dates(start_date, end_date, frequency)
+    periods_per_year = {"weekly": 52, "quarterly": 4}.get(frequency, 12)
 
     regimes: dict[str, list[float]] = {"Bull": [], "Flat": [], "Bear": []}
 
@@ -621,7 +627,7 @@ def run_regime_analysis(
     for regime, returns in regimes.items():
         if returns:
             avg_r = sum(returns) / len(returns)
-            sharpe = compute_sharpe(pl.Series(returns))
+            sharpe = compute_sharpe(pl.Series(returns), periods_per_year)
             result[regime] = {
                 "n_months": len(returns),
                 "avg_return": avg_r,

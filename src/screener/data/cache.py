@@ -160,7 +160,12 @@ class CacheManager:
             orient="row",
         ).with_columns(
             pl.col("report_date").str.to_date("%Y-%m-%d"),
-            pl.col("observed_at").str.to_datetime("%Y-%m-%d"),
+            # Tolerate both date-only ("YYYY-MM-DD", the bulk producers' format)
+            # and full-timestamp observed_at strings (what record_pit_snapshot
+            # writes) — slice the date prefix so a timestamped caller can't crash
+            # the whole bulk load on a strict date-only parse.
+            pl.col("observed_at").str.slice(0, 10)
+            .str.to_date("%Y-%m-%d").cast(pl.Datetime),
         )
         self._conn.register("_pit_bulk", df.to_arrow())
         self._conn.execute(

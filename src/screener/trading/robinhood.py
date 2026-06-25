@@ -88,6 +88,16 @@ class RobinhoodBroker:
                 continue
 
             market_value = quantity * avg_cost
+            if not (quotes_data and symbol in quotes_data):
+                # No live quote: market value falls back to avg cost, a STALE
+                # basis. Rebalance targets are computed off true market equity,
+                # so an appreciated winner valued at cost looks underweight and
+                # gets over-bought. Surface it so the skill can pass quotes.
+                logger.warning(
+                    "No live quote for %s — valuing at avg cost ($%.2f); "
+                    "rebalance sizing for this name may be off",
+                    symbol, avg_cost,
+                )
             if quotes_data and symbol in quotes_data:
                 q = quotes_data[symbol]
                 # Coalesce: dict.get returns a present-but-null/zero value (halted

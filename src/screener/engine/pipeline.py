@@ -18,44 +18,48 @@ def enrich_with_price_data(
     Computes:
     - momentum_12m_return: 12-month return excluding most recent month
     - sma_200: 200-day simple moving average of close price
-    - realized_vol_20d: annualized 20-day realized volatility
+    - realized_vol_20d: annualized 20-day realized volatility (arithmetic
+      daily returns)
+
+    Short-history tickers are guarded: a freshly listed/cached name with only
+    a handful of days produces a spurious near-zero ``realized_vol_20d`` (which
+    both falsely trips ``low_volatility_filter`` and, under ``inverse_vol``
+    weighting, explodes its weight ~1/vol) and a meaningless partial SMA. Each
+    derived column is emitted only when enough days exist, else null — nulls
+    flow safely downstream (the low-vol filter passes them via fill_null, and
+    inverse-vol weighting neutralises them via its median fallback).
     """
     if prices.is_empty() or fundamentals.is_empty():
         return fundamentals
 
     sorted_prices = prices.sort(["ticker", "date"])
 
-    # SMA-200: mean of last 200 closing prices per ticker
-    sma_data = sorted_prices.group_by("ticker").agg(
-        pl.col("close").tail(200).mean().alias("sma_200"),
-    )
-
-    # Momentum: (price_1m_ago / price_12m_ago) - 1
-    # ~22 trading days = 1 month, ~252 trading days = 12 months
-    momentum_data = sorted_prices.group_by("ticker").agg(
+    # ~22 trading days = 1 month, ~252 trading days = 12 months.
+    agg = sorted_prices.group_by("ticker").agg(
+        pl.col("close").tail(200).mean().alias("sma_200_raw"),
         pl.col("close").tail(22).first().alias("price_1m_ago"),
         pl.col("close").tail(252).first().alias("price_12m_ago"),
+        (pl.col("close").tail(21).pct_change().drop_nulls().std() * (252 ** 0.5))
+        .alias("realized_vol_20d_raw"),
         pl.col("close").len().alias("n_days"),
     )
-    momentum_data = momentum_data.with_columns(
+    agg = agg.with_columns(
+        pl.when(pl.col("n_days") >= 150)
+        .then(pl.col("sma_200_raw"))
+        .otherwise(None)
+        .alias("sma_200"),
         pl.when(pl.col("n_days") >= 252)
         .then((pl.col("price_1m_ago") / pl.col("price_12m_ago")) - 1.0)
         .otherwise(None)
-        .alias("momentum_12m_return")
-    ).select("ticker", "momentum_12m_return")
-
-    # Realized volatility: annualized std of daily log returns over last 20 days
-    vol_data = sorted_prices.group_by("ticker").agg(
-        (pl.col("close").tail(21).pct_change().drop_nulls().std() * (252 ** 0.5))
+        .alias("momentum_12m_return"),
+        # Need ~a full 20-day window of returns for a meaningful vol estimate.
+        pl.when(pl.col("n_days") >= 16)
+        .then(pl.col("realized_vol_20d_raw"))
+        .otherwise(None)
         .alias("realized_vol_20d"),
-    )
+    ).select("ticker", "sma_200", "momentum_12m_return", "realized_vol_20d")
 
-    result = fundamentals
-    result = result.join(sma_data, on="ticker", how="left")
-    result = result.join(momentum_data, on="ticker", how="left")
-    result = result.join(vol_data, on="ticker", how="left")
-
-    return result
+    return fundamentals.join(agg, on="ticker", how="left")
 
 
 class ScreeningPipeline:

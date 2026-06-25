@@ -114,9 +114,12 @@ class ResearchLoop:
             # Re-check budget per-variation: the start-of-run check passes for a
             # fresh name regardless of variation count, so an experiment with more
             # variations than max_experiments would otherwise blow past the cap.
+            # Use the ABSOLUTE cap, not ``max - var_idx`` — each completed
+            # variation has already logged one row, so ``count`` grows with
+            # var_idx; subtracting var_idx too double-counts and aborts at ~max/2.
             if not self._guardrails.check_experiment_budget(
                 experiment.name,
-                experiment.guardrails.max_experiments - var_idx,
+                experiment.guardrails.max_experiments,
             ):
                 logger.warning(
                     "Experiment budget reached after %d variations — stopping.",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import date
 
 import polars as pl
@@ -7,6 +8,7 @@ from screener.evaluation.report import (
     MonteCarloResult,
     RegimeResult,
     _ols_with_intercept,
+    _run_single_mc_iteration,
     _solve_linear,
     run_regime_analysis,
 )
@@ -92,6 +94,27 @@ def test_regime_analysis():
 
     assert isinstance(result, RegimeResult)
     assert len(result.regimes) > 0
+
+
+def test_mc_iteration_honors_periods_per_year():
+    """Regression: the Monte Carlo null Sharpe must annualize on the same cadence
+    as the strategy it's compared against. Previously _run_single_mc_iteration
+    hardcoded compute_sharpe's default (12), so a quarterly/weekly config made
+    the null apples-to-oranges and corrupted the significance percentile.
+
+    Same returns, only periods_per_year differs → Sharpe must scale by √ratio.
+    """
+    rebalance_dates = [date(2024, 1, 1), date(2024, 4, 1), date(2024, 7, 1)]
+    tickers_by_date = {0: ["A"], 1: ["A"]}
+    prices_by_period = {0: {"A": 0.10}, 1: {"A": -0.02}}  # non-constant → std>0
+
+    base = (42, 1, rebalance_dates, tickers_by_date, prices_by_period, 0.0)
+    sharpe_q = _run_single_mc_iteration(base + (4,))    # quarterly
+    sharpe_m = _run_single_mc_iteration(base + (12,))   # monthly
+
+    assert sharpe_q != 0.0
+    # Ratio of annualization factors is √(12/4); independent of the raw returns.
+    assert abs(sharpe_m / sharpe_q - math.sqrt(12 / 4)) < 1e-9
 
 
 def test_regime_summary_format():
