@@ -64,6 +64,59 @@ def _resolve_target_weights(result, weighting: str, picks: list) -> dict:
     return target_weights
 
 
+def _write_trade_log(
+    *,
+    broker_mode: str,
+    dry_run: bool,
+    account: dict,
+    picks: list,
+    weighting: str,
+    target_weights: dict,
+    previous_positions: list,
+    orders: list,
+    extended_result,
+    suffix: str = "",
+    extra: dict | None = None,
+    trade_dir: Path = Path("results/trades"),
+) -> Path:
+    """Write a rebalance trade log JSON. Shared by every broker's trade command so
+    the on-disk schema can't drift between them. ``extra`` injects broker-specific
+    top-level keys (e.g. ``{"broker": "etoro"}``) just after ``date``; ``suffix``
+    distinguishes filenames (e.g. ``_etoro``).
+    """
+    from datetime import datetime
+
+    trade_dir.mkdir(parents=True, exist_ok=True)
+    log_file = trade_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}{suffix}.json"
+
+    z_cols = [c for c in extended_result.columns if c.startswith("z_")]
+    score_cols = ["ticker", "composite_score", "sector", *z_cols]
+    if "company_name" in extended_result.columns:
+        score_cols.append("company_name")
+    screen_results = extended_result.select(score_cols).to_dicts()
+
+    trade_log = {
+        "date": str(date.today()),
+        **(extra or {}),
+        "mode": broker_mode,
+        "dry_run": dry_run,
+        "account": account,
+        "picks": picks,
+        "weighting": weighting,
+        "target_weights": target_weights,
+        "previous_positions": previous_positions,
+        "orders": [
+            {"ticker": o.ticker, "side": o.side,
+             "notional": o.notional, "status": o.status}
+            for o in (orders or [])
+        ],
+        "screen_results": screen_results,
+    }
+    with open(log_file, "w") as f:
+        json.dump(trade_log, f, indent=2)
+    return log_file
+
+
 @app.command()
 def screen(
     config: Annotated[Path, typer.Option(help="Config YAML")] = Path("config/default.yaml"),
@@ -607,37 +660,17 @@ def trade(
     if dry_run:
         typer.echo("\nThis was a dry run. Use --no-dry-run to execute trades.")
 
-    # Save trade log
-    from datetime import datetime
-
-    trade_dir = Path("results/trades")
-    trade_dir.mkdir(parents=True, exist_ok=True)
-    log_file = trade_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-
-    z_cols = [c for c in extended_result.columns if c.startswith("z_")]
-    score_cols = ["ticker", "composite_score", "sector", *z_cols]
-    if "company_name" in extended_result.columns:
-        score_cols.append("company_name")
-    screen_results = extended_result.select(score_cols).to_dicts()
-
-    trade_log = {
-        "date": str(date.today()),
-        "mode": broker.mode,
-        "dry_run": dry_run,
-        "account": account,
-        "picks": picks,
-        "weighting": pipeline_config.weighting,
-        "target_weights": target_weights,
-        "previous_positions": list(current.keys()),
-        "orders": [
-            {"ticker": o.ticker, "side": o.side,
-             "notional": o.notional, "status": o.status}
-            for o in (orders if orders else [])
-        ],
-        "screen_results": screen_results,
-    }
-    with open(log_file, "w") as f:
-        json.dump(trade_log, f, indent=2)
+    log_file = _write_trade_log(
+        broker_mode=broker.mode,
+        dry_run=dry_run,
+        account=account,
+        picks=picks,
+        weighting=pipeline_config.weighting,
+        target_weights=target_weights,
+        previous_positions=list(current.keys()),
+        orders=orders,
+        extended_result=extended_result,
+    )
     typer.echo(f"Trade log: {log_file}")
 
     cache.close()
@@ -745,38 +778,19 @@ def etoro_trade(
     if dry_run:
         typer.echo("\nThis was a dry run. Use --no-dry-run to execute trades.")
 
-    # Save trade log
-    from datetime import datetime
-
-    trade_dir = Path("results/trades")
-    trade_dir.mkdir(parents=True, exist_ok=True)
-    log_file = trade_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_etoro.json"
-
-    z_cols = [c for c in extended_result.columns if c.startswith("z_")]
-    score_cols = ["ticker", "composite_score", "sector", *z_cols]
-    if "company_name" in extended_result.columns:
-        score_cols.append("company_name")
-    screen_results = extended_result.select(score_cols).to_dicts()
-
-    trade_log = {
-        "date": str(date.today()),
-        "broker": "etoro",
-        "mode": broker.mode,
-        "dry_run": dry_run,
-        "account": account,
-        "picks": picks,
-        "weighting": pipeline_config.weighting,
-        "target_weights": target_weights,
-        "previous_positions": list(current.keys()),
-        "orders": [
-            {"ticker": o.ticker, "side": o.side,
-             "notional": o.notional, "status": o.status}
-            for o in (orders if orders else [])
-        ],
-        "screen_results": screen_results,
-    }
-    with open(log_file, "w") as f:
-        json.dump(trade_log, f, indent=2)
+    log_file = _write_trade_log(
+        broker_mode=broker.mode,
+        dry_run=dry_run,
+        account=account,
+        picks=picks,
+        weighting=pipeline_config.weighting,
+        target_weights=target_weights,
+        previous_positions=list(current.keys()),
+        orders=orders,
+        extended_result=extended_result,
+        suffix="_etoro",
+        extra={"broker": "etoro"},
+    )
     typer.echo(f"Trade log: {log_file}")
 
     cache.close()
