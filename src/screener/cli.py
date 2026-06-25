@@ -8,6 +8,7 @@ import typer
 
 from screener.config import PipelineConfig, Settings
 from screener.research.harness import (
+    PRICE_LOOKBACK_DAYS,
     backtest_universe,
     build_pipeline,
     make_pit_server,
@@ -115,6 +116,117 @@ def _write_trade_log(
     with open(log_file, "w") as f:
         json.dump(trade_log, f, indent=2)
     return log_file
+
+
+def _run_rebalance(
+    *,
+    broker,
+    provider,
+    cache,
+    pipeline,
+    pipeline_config: PipelineConfig,
+    dry_run: bool,
+    get_holdings,
+    is_live_real: bool,
+    live_warning: str,
+    finalize_picks=None,
+    log_suffix: str = "",
+    log_extra: dict | None = None,
+    trade_dir: Path = Path("results/trades"),
+) -> None:
+    """Shared rebalance flow for every broker's trade command.
+
+    The brokers diverge in only two places, injected as callbacks:
+    - ``get_holdings(enriched) -> {ticker: market_value}`` — Alpaca reads positions
+      directly; eToro must screen for candidates first, then resolve_positions.
+    - ``finalize_picks(result, picks) -> picks`` — eToro drops picks it can't
+      resolve to instrument IDs (and renormalizes weights over the rest); Alpaca
+      passes ``None`` (identity).
+    Everything else — screening, hold-bonus, weights, order compute, the
+    dry-run/execute/report block, and the trade log — is identical, so a change to
+    the rebalance contract lands once. The money path (picks → target_weights →
+    compute_rebalance_orders → execute_orders) is byte-for-byte the prior logic.
+    """
+    from screener.engine.pipeline import enrich_with_price_data
+
+    account = broker.get_account()
+    typer.echo(f"Equity: ${account['equity']:,.2f}  Cash: ${account['cash']:,.2f}")
+
+    tickers = provider.get_universe(pipeline_config.universe)
+    today = date.today()
+    prices = provider.get_prices(
+        tickers, today - timedelta(days=PRICE_LOOKBACK_DAYS), today
+    )
+    fundamentals = provider.get_fundamentals(tickers)
+    enriched = enrich_with_price_data(fundamentals, prices)
+
+    current = get_holdings(enriched)
+    hold_bonus_tickers = set(current.keys()) if current else None
+    if hold_bonus_tickers:
+        typer.echo(f"Current positions: {', '.join(sorted(hold_bonus_tickers))}")
+    else:
+        typer.echo("No current positions")
+
+    extended_result = pipeline.run(
+        enriched,
+        hold_bonus_tickers=hold_bonus_tickers,
+        hold_bonus=pipeline_config.hold_bonus,
+    )
+    if extended_result.is_empty():
+        typer.echo("No stocks passed filters")
+        raise typer.Exit(1)
+
+    result = extended_result.head(pipeline_config.top_n)
+    picks = result["ticker"].to_list()
+    typer.echo(f"Target portfolio ({len(picks)} stocks): {', '.join(picks)}")
+
+    if finalize_picks is not None:
+        picks = finalize_picks(result, picks)
+
+    target_weights = _resolve_target_weights(result, pipeline_config.weighting, picks)
+    orders = broker.compute_rebalance_orders(picks, account, target_weights)
+
+    if not orders:
+        typer.echo("Portfolio already balanced — no trades needed")
+    else:
+        typer.echo(f"\nOrders ({'DRY RUN' if dry_run else 'LIVE'}):")
+        for o in orders:
+            typer.echo(f"  {o.side.upper():<5} {o.ticker:<6} ${o.notional:>10,.2f}")
+
+        if not dry_run and is_live_real:
+            typer.echo(f"\n{live_warning}")
+
+        results = broker.execute_orders(
+            orders, dry_run=dry_run,
+            stop_loss_pct=pipeline_config.position_stop_loss,
+            target_weights=target_weights,
+        )
+
+        submitted = sum(1 for o in results if o.status == "submitted")
+        errors = sum(1 for o in results if o.status.startswith("error"))
+        if not dry_run:
+            typer.echo(f"\n{submitted} orders submitted, {errors} errors")
+
+    if dry_run:
+        typer.echo("\nThis was a dry run. Use --no-dry-run to execute trades.")
+
+    log_file = _write_trade_log(
+        broker_mode=broker.mode,
+        dry_run=dry_run,
+        account=account,
+        picks=picks,
+        weighting=pipeline_config.weighting,
+        target_weights=target_weights,
+        previous_positions=list(current.keys()),
+        orders=orders,
+        extended_result=extended_result,
+        suffix=log_suffix,
+        extra=log_extra,
+        trade_dir=trade_dir,
+    )
+    typer.echo(f"Trade log: {log_file}")
+
+    cache.close()
 
 
 @app.command()
@@ -583,7 +695,6 @@ def trade(
     """Rebalance portfolio via Alpaca (paper or live trading)."""
     _setup_logging(verbose)
 
-    from screener.engine.pipeline import enrich_with_price_data
     from screener.trading.broker import AlpacaBroker
 
     settings = Settings()
@@ -600,80 +711,16 @@ def trade(
         paper=settings.alpaca_paper,
     )
     typer.echo(f"Mode: {broker.mode}")
-
-    account = broker.get_account()
-    typer.echo(f"Equity: ${account['equity']:,.2f}  Cash: ${account['cash']:,.2f}")
-
-    current = broker.get_positions()
-    hold_bonus_tickers = set(current.keys()) if current else None
-    if hold_bonus_tickers:
-        typer.echo(f"Current positions: {', '.join(sorted(hold_bonus_tickers))}")
-    else:
-        typer.echo("No current positions")
-
     provider, cache = _make_provider(settings)
-    tickers = provider.get_universe(pipeline_config.universe)
 
-    today = date.today()
-    prices = provider.get_prices(tickers, today - timedelta(days=400), today)
-    fundamentals = provider.get_fundamentals(tickers)
-    enriched = enrich_with_price_data(fundamentals, prices)
-    extended_result = pipeline.run(
-        enriched,
-        hold_bonus_tickers=hold_bonus_tickers,
-        hold_bonus=pipeline_config.hold_bonus,
+    _run_rebalance(
+        broker=broker, provider=provider, cache=cache, pipeline=pipeline,
+        pipeline_config=pipeline_config, dry_run=dry_run,
+        # Alpaca reads its positions directly (independent of the screen).
+        get_holdings=lambda enriched: broker.get_positions(),
+        is_live_real=not settings.alpaca_paper,
+        live_warning="⚠️  LIVE TRADING — orders will execute with real money!",
     )
-
-    if extended_result.is_empty():
-        typer.echo("No stocks passed filters")
-        raise typer.Exit(1)
-
-    result = extended_result.head(pipeline_config.top_n)
-    picks = result["ticker"].to_list()
-    typer.echo(f"Target portfolio ({len(picks)} stocks): {', '.join(picks)}")
-
-    target_weights = _resolve_target_weights(result, pipeline_config.weighting, picks)
-
-    orders = broker.compute_rebalance_orders(picks, account, target_weights)
-
-    if not orders:
-        typer.echo("Portfolio already balanced — no trades needed")
-    else:
-        typer.echo(f"\nOrders ({'DRY RUN' if dry_run else 'LIVE'}):")
-        for o in orders:
-            typer.echo(f"  {o.side.upper():<5} {o.ticker:<6} ${o.notional:>10,.2f}")
-
-        if not dry_run and not settings.alpaca_paper:
-            typer.echo("\n⚠️  LIVE TRADING — orders will execute with real money!")
-
-        results = broker.execute_orders(
-            orders, dry_run=dry_run,
-            stop_loss_pct=pipeline_config.position_stop_loss,
-            target_weights=target_weights,
-        )
-
-        submitted = sum(1 for o in results if o.status == "submitted")
-        errors = sum(1 for o in results if o.status.startswith("error"))
-        if not dry_run:
-            typer.echo(f"\n{submitted} orders submitted, {errors} errors")
-
-    if dry_run:
-        typer.echo("\nThis was a dry run. Use --no-dry-run to execute trades.")
-
-    log_file = _write_trade_log(
-        broker_mode=broker.mode,
-        dry_run=dry_run,
-        account=account,
-        picks=picks,
-        weighting=pipeline_config.weighting,
-        target_weights=target_weights,
-        previous_positions=list(current.keys()),
-        orders=orders,
-        extended_result=extended_result,
-    )
-    typer.echo(f"Trade log: {log_file}")
-
-    cache.close()
 
 
 @app.command("etoro-trade")
@@ -685,7 +732,6 @@ def etoro_trade(
     """Rebalance portfolio via eToro (demo or real trading)."""
     _setup_logging(verbose)
 
-    from screener.engine.pipeline import enrich_with_price_data
     from screener.trading.etoro import EtoroBroker
 
     settings = Settings()
@@ -702,98 +748,41 @@ def etoro_trade(
         demo=settings.etoro_demo,
     )
     typer.echo(f"Mode: {broker.mode}")
-
-    account = broker.get_account()
-    typer.echo(f"Equity: ${account['equity']:,.2f}  Cash: ${account['cash']:,.2f}")
-
     provider, cache = _make_provider(settings)
-    tickers = provider.get_universe(pipeline_config.universe)
 
-    today = date.today()
-    prices = provider.get_prices(tickers, today - timedelta(days=400), today)
-    fundamentals = provider.get_fundamentals(tickers)
-    enriched = enrich_with_price_data(fundamentals, prices)
+    def get_holdings(enriched):
+        # eToro can only map instruments it searches for, so screen for the top
+        # candidates first, then resolve their positions.
+        initial = pipeline.run(enriched)
+        if initial.is_empty():
+            return {}
+        candidates = initial.head(pipeline_config.top_n)["ticker"].to_list()
+        return broker.resolve_positions(candidates)
 
-    # Quick screen to get top candidates for instrument resolution
-    initial_result = pipeline.run(enriched)
-    if initial_result.is_empty():
-        typer.echo("No stocks passed filters")
-        raise typer.Exit(1)
-
-    candidates = initial_result.head(pipeline_config.top_n)["ticker"].to_list()
-    current = broker.resolve_positions(candidates)
-    hold_bonus_tickers = set(current.keys()) if current else None
-    if hold_bonus_tickers:
-        typer.echo(f"Current positions: {', '.join(sorted(hold_bonus_tickers))}")
-    else:
-        typer.echo("No current positions")
-
-    extended_result = pipeline.run(
-        enriched,
-        hold_bonus_tickers=hold_bonus_tickers,
-        hold_bonus=pipeline_config.hold_bonus,
-    )
-
-    result = extended_result.head(pipeline_config.top_n)
-    picks = result["ticker"].to_list()
-    typer.echo(f"Target portfolio ({len(picks)} stocks): {', '.join(picks)}")
-
-    resolved = broker.resolve_instrument_ids(picks)
-    unresolved = set(picks) - set(resolved.keys())
-    if unresolved:
-        typer.echo(f"Warning: could not resolve eToro instrument IDs for: {', '.join(unresolved)}")
-        picks = [t for t in picks if t in resolved]
-        if pipeline_config.weighting != "equal":
+    def finalize_picks(result, picks):
+        resolved = broker.resolve_instrument_ids(picks)
+        unresolved = set(picks) - set(resolved.keys())
+        if unresolved:
             typer.echo(
-                "  → weights renormalized over the remaining picks; eToro sizing "
-                "will differ from brokers that hold the dropped name(s)."
+                f"Warning: could not resolve eToro instrument IDs for: "
+                f"{', '.join(unresolved)}"
             )
+            picks = [t for t in picks if t in resolved]
+            if pipeline_config.weighting != "equal":
+                typer.echo(
+                    "  → weights renormalized over the remaining picks; eToro "
+                    "sizing will differ from brokers that hold the dropped name(s)."
+                )
+        return picks
 
-    # Weight over the resolvable picks (renormalized to sum to 1).
-    target_weights = _resolve_target_weights(result, pipeline_config.weighting, picks)
-
-    orders = broker.compute_rebalance_orders(picks, account, target_weights)
-
-    if not orders:
-        typer.echo("Portfolio already balanced — no trades needed")
-    else:
-        typer.echo(f"\nOrders ({'DRY RUN' if dry_run else 'LIVE'}):")
-        for o in orders:
-            typer.echo(f"  {o.side.upper():<5} {o.ticker:<6} ${o.notional:>10,.2f}")
-
-        if not dry_run and not settings.etoro_demo:
-            typer.echo("\nWARNING: LIVE TRADING — orders will execute with real money!")
-
-        results = broker.execute_orders(
-            orders, dry_run=dry_run,
-            stop_loss_pct=pipeline_config.position_stop_loss,
-            target_weights=target_weights,
-        )
-
-        submitted = sum(1 for o in results if o.status == "submitted")
-        errors = sum(1 for o in results if o.status.startswith("error"))
-        if not dry_run:
-            typer.echo(f"\n{submitted} orders submitted, {errors} errors")
-
-    if dry_run:
-        typer.echo("\nThis was a dry run. Use --no-dry-run to execute trades.")
-
-    log_file = _write_trade_log(
-        broker_mode=broker.mode,
-        dry_run=dry_run,
-        account=account,
-        picks=picks,
-        weighting=pipeline_config.weighting,
-        target_weights=target_weights,
-        previous_positions=list(current.keys()),
-        orders=orders,
-        extended_result=extended_result,
-        suffix="_etoro",
-        extra={"broker": "etoro"},
+    _run_rebalance(
+        broker=broker, provider=provider, cache=cache, pipeline=pipeline,
+        pipeline_config=pipeline_config, dry_run=dry_run,
+        get_holdings=get_holdings, finalize_picks=finalize_picks,
+        is_live_real=not settings.etoro_demo,
+        live_warning="WARNING: LIVE TRADING — orders will execute with real money!",
+        log_suffix="_etoro", log_extra={"broker": "etoro"},
     )
-    typer.echo(f"Trade log: {log_file}")
-
-    cache.close()
 
 
 @app.command("list-plugins")
