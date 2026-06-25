@@ -37,6 +37,41 @@ def test_close_column_not_leaked_from_pit(cache: CacheManager):
     assert df["close"][0] == 175.0
 
 
+def test_in_memory_price_frame_matches_db(cache: CacheManager):
+    """The backtest's in-memory price-frame path must return identical latest
+    close / 20-day avg volume / tradeable tickers as the DB query path — this is
+    what lets run_backtest skip re-scanning price_cache every rebalance."""
+    rows = []
+    for ticker, base in [("AAPL", 100.0), ("MSFT", 200.0)]:
+        for i in range(25):
+            d = datetime.date(2024, 3, 1) + datetime.timedelta(days=i)
+            if d.weekday() < 5:
+                rows.append({
+                    "ticker": ticker, "date": d, "open": base, "high": base + 1,
+                    "low": base - 1, "close": base + i,
+                    "volume": 1_000_000.0 + i * 100_000.0,
+                })
+    prices = pl.DataFrame(rows).with_columns(pl.col("date").cast(pl.Date))
+    cache.store_prices(prices, source="test")
+
+    pit = PITDataServer(MagicMock(), cache, MagicMock())
+    as_of = datetime.date(2024, 3, 30)
+    tickers = ["AAPL", "MSFT"]
+
+    db_prices = pit._get_latest_prices(tickers, as_of).sort("ticker")
+    db_tradeable = sorted(pit.get_tradeable_tickers(as_of))
+
+    pit.use_price_frame(prices)
+    mem_prices = pit._get_latest_prices(tickers, as_of).sort("ticker")
+    mem_tradeable = sorted(pit.get_tradeable_tickers(as_of))
+
+    assert mem_tradeable == db_tradeable == ["AAPL", "MSFT"]
+    assert mem_prices["ticker"].to_list() == db_prices["ticker"].to_list()
+    for col in ("close", "avg_volume_20d"):
+        for a, b in zip(mem_prices[col].to_list(), db_prices[col].to_list()):
+            assert abs(a - b) < 1e-9, f"{col} diverged: {a} vs {b}"
+
+
 def test_avg_volume_is_not_single_day(cache: CacheManager):
     """avg_volume_20d should be a 20-day average, not a single day's volume."""
     # Store 25 days of prices with varying volume

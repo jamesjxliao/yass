@@ -31,6 +31,9 @@ class _FakePITServer:
     def __init__(self, tickers):
         self._tickers = tickers
 
+    def use_price_frame(self, price_data):
+        pass  # the fake serves screening data directly; no price-frame lookups
+
     def get_universe_as_of(self, index, as_of):
         return list(self._tickers)
 

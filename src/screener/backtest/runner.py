@@ -92,6 +92,9 @@ def run_backtest(
     """
     rebalance_dates = _generate_rebalance_dates(start_date, end_date, frequency)
     ppy = periods_per_year(frequency)
+    # Serve the per-rebalance close/volume lookups from the price history we
+    # already hold in memory instead of re-scanning price_cache each period.
+    pit_server.use_price_frame(price_data)
     if len(rebalance_dates) < 2:
         logger.warning("Not enough rebalance dates for backtest")
         return compute_metrics_from_returns(pl.Series([], dtype=pl.Float64))

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, timedelta
 
 import polars as pl
 
@@ -35,6 +35,20 @@ class PITDataServer:
         self._universe = universe_manager
         self._pit = PITQuery(cache)
         self._has_pit_data: bool | None = None
+        self._price_frame: pl.DataFrame | None = None
+
+    def use_price_frame(self, price_data: pl.DataFrame) -> None:
+        """Serve close/volume queries from an in-memory frame instead of the DB.
+
+        A backtest already holds the full price history in memory, but the
+        per-rebalance tradeable-ticker and latest-price lookups otherwise re-scan
+        the multi-million-row price_cache table 2× per period (~hundreds of
+        scans). Pointing them at the loaded frame is the same result computed
+        in-memory. Only safe when the frame covers every ticker/date these
+        lookups need — i.e. the backtest's full-membership price_data; the live
+        screen leaves this unset and keeps querying the DB.
+        """
+        self._price_frame = price_data
 
     def _check_pit_data(self) -> bool:
         """Check whether pit_snapshots has data (memoized)."""
@@ -49,6 +63,21 @@ class PITDataServer:
         self, tickers: list[str], as_of_date: date
     ) -> pl.DataFrame:
         """Get close price and 20-day avg volume as of date from price_cache."""
+        if self._price_frame is not None:
+            # Same as the SQL below, in-memory: latest close (date < as_of) and
+            # the mean of the latest 20 volumes, per ticker.
+            sub = self._price_frame.filter(
+                pl.col("ticker").is_in(tickers) & (pl.col("date") < as_of_date)
+            ).sort(["ticker", "date"])
+            if sub.is_empty():
+                return pl.DataFrame(
+                    schema={"ticker": pl.String, "close": pl.Float64,
+                            "avg_volume_20d": pl.Float64}
+                )
+            return sub.group_by("ticker").agg(
+                pl.col("close").last().alias("close"),
+                pl.col("volume").tail(20).mean().alias("avg_volume_20d"),
+            )
         result = self._cache.to_polars(
             """WITH recent AS (
                    SELECT ticker, close, volume,
@@ -77,11 +106,19 @@ class PITDataServer:
         lookback window. This naturally excludes delisted/acquired stocks
         without needing historical index constituency data.
         """
-        start = str(as_of_date - __import__("datetime").timedelta(days=lookback_days))
+        lo = as_of_date - timedelta(days=lookback_days)
+        if self._price_frame is not None:
+            sub = self._price_frame.filter(
+                (pl.col("date") >= lo) & (pl.col("date") <= as_of_date)
+            )
+            # price_frame is membership-only, but get_universe_as_of intersects
+            # with members anyway, so the universe is identical to using the full
+            # price_cache here.
+            return sub["ticker"].unique().to_list() if not sub.is_empty() else []
         result = self._cache.to_polars(
             """SELECT DISTINCT ticker FROM price_cache
                WHERE date >= ?::DATE AND date <= ?::DATE""",
-            [start, str(as_of_date)],
+            [str(lo), str(as_of_date)],
         )
         if result.is_empty():
             return []
