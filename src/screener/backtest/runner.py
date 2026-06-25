@@ -6,7 +6,11 @@ from datetime import date
 import polars as pl
 from dateutil.relativedelta import relativedelta
 
-from screener.backtest.metrics import BacktestMetrics, compute_metrics_from_returns
+from screener.backtest.metrics import (
+    BacktestMetrics,
+    compute_metrics_from_returns,
+    periods_per_year,
+)
 from screener.backtest.pit_server import PITDataServer
 from screener.backtest.walkforward import (
     FoldResult,
@@ -87,7 +91,7 @@ def run_backtest(
         weighting: Position-sizing scheme — "equal" (1/N) or "inverse_vol" (~1/realized_vol).
     """
     rebalance_dates = _generate_rebalance_dates(start_date, end_date, frequency)
-    periods_per_year = {"weekly": 52, "quarterly": 4}.get(frequency, 12)
+    ppy = periods_per_year(frequency)
     if len(rebalance_dates) < 2:
         logger.warning("Not enough rebalance dates for backtest")
         return compute_metrics_from_returns(pl.Series([], dtype=pl.Float64))
@@ -266,7 +270,7 @@ def run_backtest(
 
     return compute_metrics_from_returns(
         returns_series,
-        periods_per_year=periods_per_year,
+        periods_per_year=ppy,
         n_years=n_years,
         total_swaps=total_swaps,
     )

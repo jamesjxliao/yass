@@ -37,6 +37,16 @@ class BacktestMetrics:
         )
 
 
+def periods_per_year(frequency: str) -> int:
+    """Annualization factor (rebalance periods per year) for a frequency.
+
+    Single source of truth: a drift between the cadence used to annualize the
+    strategy and the one used for the MC null / benchmarks silently corrupts
+    Sharpe comparisons (see evaluation.report).
+    """
+    return {"weekly": 52, "quarterly": 4}.get(frequency, 12)
+
+
 def compute_sharpe(returns: pl.Series, periods_per_year: int = 12) -> float:
     """Annualized Sharpe ratio from periodic returns."""
     mean = returns.mean()

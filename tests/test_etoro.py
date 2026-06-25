@@ -1,6 +1,15 @@
+import logging
 from unittest.mock import MagicMock
 
-from screener.trading.etoro import EtoroBroker, compute_equity
+import pytest
+from screener.trading.broker import RebalanceOrder
+from screener.trading.etoro import EtoroBroker, EtoroPosition, compute_equity
+
+
+@pytest.fixture(autouse=True)
+def _no_settle_sleep(monkeypatch):
+    """Zero the close/open verification settle so execute_orders tests stay fast."""
+    monkeypatch.setattr("screener.trading.etoro._CLOSE_SETTLE_SECONDS", 0.0)
 
 
 def test_equity_positions_only():
@@ -306,8 +315,15 @@ class TestExecuteOrdersStopLoss:
             "equity": 10000, "cash": 5000, "buying_power": 5000, "portfolio_value": 5000,
         })
         broker.get_positions = MagicMock(return_value={})
+        broker.resolve_positions = MagicMock(return_value={})
         broker.cancel_open_orders = MagicMock(return_value=0)
-        broker.get_positions_detailed = MagicMock(return_value=[])
+        # Phase-1 read (nothing to sell), then the buy-verify re-read shows the
+        # opened AAPL position as held → stays "submitted".
+        broker.get_positions_detailed = MagicMock(side_effect=[
+            [],
+            [EtoroPosition(position_id=1, instrument_id=1129, ticker="AAPL",
+                           amount=1000, units=5.0, open_rate=200.0, pnl=0)],
+        ])
         broker._get_rate = MagicMock(return_value=150.0)
         broker._open_position = MagicMock(return_value={"orderForOpen": {}})
 
@@ -327,8 +343,13 @@ class TestExecuteOrdersStopLoss:
             "equity": 10000, "cash": 5000, "buying_power": 5000, "portfolio_value": 5000,
         })
         broker.get_positions = MagicMock(return_value={})
+        broker.resolve_positions = MagicMock(return_value={})
         broker.cancel_open_orders = MagicMock(return_value=0)
-        broker.get_positions_detailed = MagicMock(return_value=[])
+        broker.get_positions_detailed = MagicMock(side_effect=[
+            [],
+            [EtoroPosition(position_id=1, instrument_id=1129, ticker="AAPL",
+                           amount=1000, units=5.0, open_rate=200.0, pnl=0)],
+        ])
         broker._open_position = MagicMock(return_value={"orderForOpen": {}})
 
         orders = [RebalanceOrder(ticker="AAPL", side="buy", notional=1000)]
@@ -338,3 +359,127 @@ class TestExecuteOrdersStopLoss:
         call_args = broker._open_position.call_args
         assert call_args[0][0] == 1129
         assert call_args[1]["stop_loss_rate"] is None
+
+
+class TestExecuteOrdersUnclearedExit:
+    """A full-exit close that eToro silently no-ops (returns HTTP 200 under PDT
+    rules) leaves the name still held on re-query → the broker must mark the sell
+    an error and abort the buys, mirroring AlpacaBroker's post-sell verification.
+    """
+
+    def _make_broker(self, monkeypatch):
+        monkeypatch.setattr("screener.trading.etoro._CLOSE_SETTLE_SECONDS", 0.0)
+        broker = EtoroBroker(api_key="k", user_key="u", demo=True)
+        broker._instrument_cache = {"OLD": 1111, "NEW": 2222}
+        broker.cancel_open_orders = MagicMock(return_value=0)
+        broker._close_position = MagicMock(return_value={"orderForClose": {}})  # 200, no raise
+        broker.get_account = MagicMock(return_value={
+            "equity": 5000, "cash": 5000, "buying_power": 5000, "portfolio_value": 5000})
+        broker.resolve_positions = MagicMock(return_value={})
+        broker._open_position = MagicMock(return_value={"orderForOpen": {}})
+        return broker
+
+    @staticmethod
+    def _old_pos():
+        return EtoroPosition(position_id=10, instrument_id=1111, ticker="OLD",
+                             amount=5000, units=10.0, open_rate=500.0, pnl=0)
+
+    def test_uncleared_full_exit_aborts_buys(self, monkeypatch):
+        broker = self._make_broker(monkeypatch)
+        # Still held on BOTH the Phase-1 read and the verification re-read:
+        # the close returned 200 but silently did nothing.
+        broker.get_positions_detailed = MagicMock(return_value=[self._old_pos()])
+        orders = [
+            RebalanceOrder(ticker="OLD", side="sell", notional=5000),  # full exit
+            RebalanceOrder(ticker="NEW", side="buy", notional=5000),
+        ]
+        result = broker.execute_orders(orders, dry_run=False)
+        status = {o.ticker: o.status for o in result}
+        assert status["OLD"].startswith("error")
+        assert status["NEW"] == "aborted"
+        broker._open_position.assert_not_called()
+
+    def test_cleared_full_exit_allows_buys(self, monkeypatch):
+        broker = self._make_broker(monkeypatch)
+        new_pos = EtoroPosition(position_id=20, instrument_id=2222, ticker="NEW",
+                                amount=5000, units=10.0, open_rate=500.0, pnl=0)
+        # Reads in order: Phase-1 (OLD held) → close-verify (OLD gone, cleared)
+        # → buy-verify (NEW now held, open cleared).
+        broker.get_positions_detailed = MagicMock(
+            side_effect=[[self._old_pos()], [], [new_pos]])
+        orders = [
+            RebalanceOrder(ticker="OLD", side="sell", notional=5000),
+            RebalanceOrder(ticker="NEW", side="buy", notional=5000),
+        ]
+        result = broker.execute_orders(orders, dry_run=False)
+        status = {o.ticker: o.status for o in result}
+        assert status["OLD"] == "submitted"
+        assert status["NEW"] == "submitted"
+        broker._open_position.assert_called_once()
+
+    def test_trim_residual_not_flagged_as_failed_exit(self, monkeypatch):
+        """A trim leaves a residual position by design — it must NOT be treated
+        as a failed close even though the ticker is still held afterward."""
+        broker = self._make_broker(monkeypatch)
+        broker._execute_trim = MagicMock()
+        broker.get_positions_detailed = MagicMock(return_value=[self._old_pos()])
+        orders = [RebalanceOrder(ticker="OLD", side="sell", notional=1000, trim=True)]
+        result = broker.execute_orders(orders, dry_run=False)
+        assert result[0].status == "submitted"  # residual is expected, not a failure
+
+
+class TestExecuteOrdersWeightCompleteness:
+    """When target_weights is provided, a buy missing from it silently falls back
+    to equal-weight sizing with a different denominator than the preview — warn."""
+
+    def _make_broker(self, monkeypatch):
+        monkeypatch.setattr("screener.trading.etoro._CLOSE_SETTLE_SECONDS", 0.0)
+        broker = EtoroBroker(api_key="k", user_key="u", demo=True)
+        broker._instrument_cache = {"NEW": 2222}
+        broker.cancel_open_orders = MagicMock(return_value=0)
+        broker.get_positions_detailed = MagicMock(return_value=[])
+        broker.resolve_positions = MagicMock(return_value={})
+        broker.get_account = MagicMock(return_value={
+            "equity": 5000, "cash": 5000, "buying_power": 5000, "portfolio_value": 5000})
+        broker._open_position = MagicMock(return_value={"orderForOpen": {}})
+        return broker
+
+    def test_missing_target_weight_warns(self, monkeypatch, caplog):
+        broker = self._make_broker(monkeypatch)
+        orders = [RebalanceOrder(ticker="NEW", side="buy", notional=1000)]
+        with caplog.at_level(logging.WARNING):
+            broker.execute_orders(orders, dry_run=False, target_weights={"OTHER": 1.0})
+        assert any("missing from target_weights" in r.getMessage() for r in caplog.records)
+
+
+class TestExecuteOrdersUnclearedBuy:
+    """_open_position returns HTTP 200 even on a silent reject, so an open that
+    produced no holding must be surfaced as an error, not logged as submitted."""
+
+    def _make_broker(self):
+        broker = EtoroBroker(api_key="k", user_key="u", demo=True)
+        broker._instrument_cache = {"NEW": 2222}
+        broker.cancel_open_orders = MagicMock(return_value=0)
+        broker.resolve_positions = MagicMock(return_value={})
+        broker.get_account = MagicMock(return_value={
+            "equity": 5000, "cash": 5000, "buying_power": 5000, "portfolio_value": 5000})
+        broker._open_position = MagicMock(return_value={"orderForOpen": {}})
+        return broker
+
+    def test_uncleared_open_marked_error(self):
+        broker = self._make_broker()
+        # Phase-1 read: no positions; buy-verify re-read: NEW still absent → failed.
+        broker.get_positions_detailed = MagicMock(side_effect=[[], []])
+        orders = [RebalanceOrder(ticker="NEW", side="buy", notional=5000)]
+        result = broker.execute_orders(orders, dry_run=False)
+        assert result[0].status.startswith("error")
+        broker._open_position.assert_called_once()  # the open WAS attempted
+
+    def test_cleared_open_stays_submitted(self):
+        broker = self._make_broker()
+        new_pos = EtoroPosition(position_id=9, instrument_id=2222, ticker="NEW",
+                                amount=5000, units=10.0, open_rate=500.0, pnl=0)
+        broker.get_positions_detailed = MagicMock(side_effect=[[], [new_pos]])
+        orders = [RebalanceOrder(ticker="NEW", side="buy", notional=5000)]
+        result = broker.execute_orders(orders, dry_run=False)
+        assert result[0].status == "submitted"

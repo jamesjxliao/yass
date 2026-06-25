@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 
 from alpaca.trading.client import TradingClient
@@ -38,6 +39,22 @@ def target_value_for(
     if target_weights is not None and ticker in target_weights:
         return equity * target_weights[ticker]
     return equity / n_tickers if n_tickers else 0.0
+
+
+def weighting_label(target_weights: dict[str, float] | None) -> str:
+    """Human-readable sizing mode for logs.
+
+    NB: the production equal-weight path passes a *populated* {ticker: 1/N} dict
+    (compute_weights(..., "equal")), NOT None — so a bare truthiness check on
+    target_weights mislabels every equal-weight run as "inverse-vol". Detect the
+    1/N signature instead.
+    """
+    if not target_weights:
+        return "equal-weight"
+    n = len(target_weights)
+    if n and all(abs(w - 1.0 / n) < 1e-9 for w in target_weights.values()):
+        return "equal-weight"
+    return "inverse-vol"
 
 
 def compute_rebalance_orders(
@@ -136,8 +153,6 @@ class AlpacaBroker:
 
     def cancel_open_orders(self) -> int:
         """Cancel all open orders and wait for holds to clear."""
-        import time
-
         from alpaca.trading.enums import QueryOrderStatus
         from alpaca.trading.requests import GetOrdersRequest
 
@@ -200,8 +215,6 @@ class AlpacaBroker:
 
     def _wait_for_fills(self, orders: list[RebalanceOrder], timeout: int = 60) -> None:
         """Wait for submitted orders to fill. Polls every 2 seconds."""
-        import time
-
         from alpaca.trading.enums import QueryOrderStatus
         from alpaca.trading.requests import GetOrdersRequest
 
@@ -310,7 +323,7 @@ class AlpacaBroker:
             logger.info(
                 "Cash available: $%.2f — sizing %d buys (%s)",
                 account["cash"], len(buys),
-                "inverse-vol" if target_weights else "equal-weight",
+                weighting_label(target_weights),
             )
             cash_remaining = account["cash"]
             for order in buys:

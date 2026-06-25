@@ -9,7 +9,11 @@ from typing import Any
 import polars as pl
 from dateutil.relativedelta import relativedelta
 
-from screener.backtest.metrics import BacktestMetrics, compute_sharpe
+from screener.backtest.metrics import (
+    BacktestMetrics,
+    compute_sharpe,
+    periods_per_year,
+)
 from screener.backtest.pit_server import PITDataServer
 from screener.backtest.runner import _generate_rebalance_dates, run_backtest
 from screener.backtest.walkforward import (
@@ -196,15 +200,6 @@ class EvaluationReport:
         }
 
 
-def _generate_monthly_dates(start: date, end: date) -> list[date]:
-    dates = []
-    current = date(start.year, start.month, 1)
-    while current <= end:
-        dates.append(current)
-        current += relativedelta(months=1)
-    return dates
-
-
 def _run_single_mc_iteration(args: tuple) -> float:
     """Run one Monte Carlo iteration. Designed for parallel execution."""
     (seed, top_n, rebalance_dates, tickers_by_date, prices_by_period, cost,
@@ -303,14 +298,14 @@ def run_monte_carlo(
     # Annualise random portfolios on the SAME cadence as the strategy Sharpe
     # they're compared against — else a non-monthly config makes the null and
     # the strategy apples-to-oranges and corrupts the significance percentile.
-    periods_per_year = {"weekly": 52, "quarterly": 4}.get(frequency, 12)
+    ppy = periods_per_year(frequency)
 
     # Run iterations in parallel
     from concurrent.futures import ThreadPoolExecutor
 
     args = [
         (42 + i, pipeline.top_n, rebalance_dates, tickers_by_date,
-         prices_by_period, cost, periods_per_year)
+         prices_by_period, cost, ppy)
         for i in range(n_iterations)
     ]
 
@@ -524,7 +519,7 @@ def run_signal_correlation(
         return CorrelationResult(matrix={}, high_correlation_pairs=[])
 
     end = start_date + relativedelta(months=sample_dates)
-    rebalance_dates = _generate_monthly_dates(start_date, end)
+    rebalance_dates = _generate_rebalance_dates(start_date, end, "monthly")
     corr_accum: dict[tuple[str, str], list[float]] = {}
 
     for rebal in rebalance_dates:
@@ -588,7 +583,7 @@ def run_regime_analysis(
 ) -> RegimeResult:
     """Analyze strategy performance in bull/flat/bear market regimes."""
     rebalance_dates = _generate_rebalance_dates(start_date, end_date, frequency)
-    periods_per_year = {"weekly": 52, "quarterly": 4}.get(frequency, 12)
+    ppy = periods_per_year(frequency)
 
     regimes: dict[str, list[float]] = {"Bull": [], "Flat": [], "Bear": []}
 
@@ -627,7 +622,7 @@ def run_regime_analysis(
     for regime, returns in regimes.items():
         if returns:
             avg_r = sum(returns) / len(returns)
-            sharpe = compute_sharpe(pl.Series(returns), periods_per_year)
+            sharpe = compute_sharpe(pl.Series(returns), ppy)
             result[regime] = {
                 "n_months": len(returns),
                 "avg_return": avg_r,

@@ -11,11 +11,18 @@ from screener.trading.broker import (
     RebalanceOrder,
     compute_rebalance_orders,
     target_value_for,
+    weighting_label,
 )
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://public-api.etoro.com/api/v1"
+
+# Seconds to wait after a full-exit close before re-reading positions to verify
+# it cleared. eToro market closes settle near-instantly during market hours;
+# this brief settle avoids a false "did not clear" on a close that is merely
+# still pending. (Patched to 0 in tests.)
+_CLOSE_SETTLE_SECONDS = 2.0
 
 
 @dataclass
@@ -455,6 +462,25 @@ class EtoroBroker:
                 order.status = f"error: {e}"
                 logger.error("SELL %s $%.2f — FAILED: %s", order.ticker, order.notional, e)
 
+        # Verify full exits actually cleared. eToro's close endpoint returns HTTP
+        # 200 even when the close is silently rejected (PDT rules: account < $25k
+        # or > 3 day-trades / 5 days), so a no-op close is otherwise marked
+        # "submitted" and the abort guard below never fires — leaving the name
+        # still held while Phase-2 buys spend cash that was never freed. Re-read
+        # positions and demote any still-held full exit to an error so it routes
+        # through the same abort path as a raised close (mirrors AlpacaBroker).
+        full_exits = [o for o in sells if not o.trim and not o.status.startswith("error")]
+        if full_exits:
+            time.sleep(_CLOSE_SETTLE_SECONDS)  # let market closes settle before re-read
+            still_held = {p.ticker for p in self.get_positions_detailed()}
+            for order in full_exits:
+                if order.ticker in still_held:
+                    order.status = "error: close did not clear (still held)"
+                    logger.error(
+                        "SELL %s (full exit) — did not clear after close; "
+                        "still held on re-query (PDT silent reject?)", order.ticker,
+                    )
+
         failed_sells = [o for o in sells if o.status.startswith("error")]
         if failed_sells:
             logger.error(
@@ -480,10 +506,22 @@ class EtoroBroker:
             equity = account["equity"]
             n_equal = len(all_target)
 
+            # Fail loud if a buy is missing from a provided weights dict: it would
+            # silently fall back to equal-weight 1/n_equal here while the preview
+            # sized it differently, so the executed size would diverge.
+            if target_weights is not None:
+                missing = [o.ticker for o in buys if o.ticker not in target_weights]
+                if missing:
+                    logger.warning(
+                        "Phase-2 sizing: %d buy(s) missing from target_weights "
+                        "(%s) — falling back to equal-weight 1/%d; size may diverge "
+                        "from preview.", len(missing), missing, n_equal,
+                    )
+
             logger.info(
                 "Cash available: $%.2f — sizing %d buys (%s)",
                 account["cash"], len(buys),
-                "inverse-vol" if target_weights else "equal-weight",
+                weighting_label(target_weights),
             )
             submitted_buys = 0
             # eToro closes are async (and silently no-op under PDT); the freed
@@ -530,6 +568,26 @@ class EtoroBroker:
                 except Exception as e:
                     order.status = f"error: {e}"
                     logger.error("BUY %s $%.2f — FAILED: %s", order.ticker, order.notional, e)
+
+            # Verify opens cleared, mirroring the full-exit verification above.
+            # _open_position returns HTTP 200 even on a silent reject, which both
+            # under-invests the book AND (since cash_remaining was already
+            # decremented) shrinks every later buy in this loop. Re-read positions
+            # and surface any submitted buy that produced no holding so a partial
+            # rebalance isn't silently logged as fully "submitted". (A buy that
+            # adds to an already-held name can't be confirmed by presence alone —
+            # this catches the common swap-in-of-a-new-name case.)
+            submitted = [o for o in buys if o.status == "submitted"]
+            if submitted:
+                time.sleep(_CLOSE_SETTLE_SECONDS)
+                held_now = {p.ticker for p in self.get_positions_detailed()}
+                for order in submitted:
+                    if order.ticker not in held_now:
+                        order.status = "error: open did not clear (not held)"
+                        logger.error(
+                            "BUY %s — did not clear after open; not held on "
+                            "re-query (PDT silent reject?)", order.ticker,
+                        )
 
         return orders
 
