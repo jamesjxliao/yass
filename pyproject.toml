@@ -18,7 +18,10 @@ httpx = "^0.27"
 pydantic = "^2.0"
 pydantic-settings = "^2.0"
 typer = "^0.12"
-click = ">=8.1,<8.3"
+# Typer 0.12.x calls click's Parameter.make_metavar() with no args; Click 8.2
+# made `ctx` required, which crashes `--help` rendering. Pin <8.2 (8.1.x has the
+# old signature). Bump together with Typer if moving to Click >=8.2.
+click = ">=8.1,<8.2"
 pyyaml = "^6.0"
 python-dateutil = "^2.9"
 pyarrow = ">=15.0"
