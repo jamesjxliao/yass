@@ -149,84 +149,89 @@ def _run_rebalance(
     """
     from screener.engine.pipeline import enrich_with_price_data
 
-    account = broker.get_account()
-    typer.echo(f"Equity: ${account['equity']:,.2f}  Cash: ${account['cash']:,.2f}")
+    try:
+        account = broker.get_account()
+        typer.echo(f"Equity: ${account['equity']:,.2f}  Cash: ${account['cash']:,.2f}")
 
-    tickers = provider.get_universe(pipeline_config.universe)
-    today = date.today()
-    prices = provider.get_prices(
-        tickers, today - timedelta(days=PRICE_LOOKBACK_DAYS), today
-    )
-    fundamentals = provider.get_fundamentals(tickers)
-    enriched = enrich_with_price_data(fundamentals, prices)
-
-    current = get_holdings(enriched)
-    hold_bonus_tickers = set(current.keys()) if current else None
-    if hold_bonus_tickers:
-        typer.echo(f"Current positions: {', '.join(sorted(hold_bonus_tickers))}")
-    else:
-        typer.echo("No current positions")
-
-    extended_result = pipeline.run(
-        enriched,
-        hold_bonus_tickers=hold_bonus_tickers,
-        hold_bonus=pipeline_config.hold_bonus,
-    )
-    if extended_result.is_empty():
-        typer.echo("No stocks passed filters")
-        raise typer.Exit(1)
-
-    result = extended_result.head(pipeline_config.top_n)
-    picks = result["ticker"].to_list()
-    typer.echo(f"Target portfolio ({len(picks)} stocks): {', '.join(picks)}")
-
-    if finalize_picks is not None:
-        picks = finalize_picks(result, picks)
-
-    target_weights = _resolve_target_weights(result, pipeline_config.weighting, picks)
-    orders = broker.compute_rebalance_orders(picks, account, target_weights)
-
-    if not orders:
-        typer.echo("Portfolio already balanced — no trades needed")
-    else:
-        typer.echo(f"\nOrders ({'DRY RUN' if dry_run else 'LIVE'}):")
-        for o in orders:
-            typer.echo(f"  {o.side.upper():<5} {o.ticker:<6} ${o.notional:>10,.2f}")
-
-        if not dry_run and is_live_real:
-            typer.echo(f"\n{live_warning}")
-
-        results = broker.execute_orders(
-            orders, dry_run=dry_run,
-            stop_loss_pct=pipeline_config.position_stop_loss,
-            target_weights=target_weights,
+        tickers = provider.get_universe(pipeline_config.universe)
+        today = date.today()
+        prices = provider.get_prices(
+            tickers, today - timedelta(days=PRICE_LOOKBACK_DAYS), today
         )
+        fundamentals = provider.get_fundamentals(tickers)
+        enriched = enrich_with_price_data(fundamentals, prices)
 
-        submitted = sum(1 for o in results if o.status == "submitted")
-        errors = sum(1 for o in results if o.status.startswith("error"))
-        if not dry_run:
-            typer.echo(f"\n{submitted} orders submitted, {errors} errors")
+        current = get_holdings(enriched)
+        hold_bonus_tickers = set(current.keys()) if current else None
+        if hold_bonus_tickers:
+            typer.echo(f"Current positions: {', '.join(sorted(hold_bonus_tickers))}")
+        else:
+            typer.echo("No current positions")
 
-    if dry_run:
-        typer.echo("\nThis was a dry run. Use --no-dry-run to execute trades.")
+        extended_result = pipeline.run(
+            enriched,
+            hold_bonus_tickers=hold_bonus_tickers,
+            hold_bonus=pipeline_config.hold_bonus,
+        )
+        if extended_result.is_empty():
+            typer.echo("No stocks passed filters")
+            raise typer.Exit(1)
 
-    log_file = _write_trade_log(
-        broker_mode=broker.mode,
-        dry_run=dry_run,
-        account=account,
-        picks=picks,
-        weighting=pipeline_config.weighting,
-        target_weights=target_weights,
-        previous_positions=list(current.keys()),
-        orders=orders,
-        extended_result=extended_result,
-        suffix=log_suffix,
-        extra=log_extra,
-        trade_dir=trade_dir,
-    )
-    typer.echo(f"Trade log: {log_file}")
+        result = extended_result.head(pipeline_config.top_n)
+        picks = result["ticker"].to_list()
+        typer.echo(f"Target portfolio ({len(picks)} stocks): {', '.join(picks)}")
 
-    cache.close()
+        if finalize_picks is not None:
+            picks = finalize_picks(result, picks)
+
+        target_weights = _resolve_target_weights(
+            result, pipeline_config.weighting, picks
+        )
+        orders = broker.compute_rebalance_orders(picks, account, target_weights)
+
+        if not orders:
+            typer.echo("Portfolio already balanced — no trades needed")
+        else:
+            typer.echo(f"\nOrders ({'DRY RUN' if dry_run else 'LIVE'}):")
+            for o in orders:
+                typer.echo(f"  {o.side.upper():<5} {o.ticker:<6} ${o.notional:>10,.2f}")
+
+            if not dry_run and is_live_real:
+                typer.echo(f"\n{live_warning}")
+
+            results = broker.execute_orders(
+                orders, dry_run=dry_run,
+                stop_loss_pct=pipeline_config.position_stop_loss,
+                target_weights=target_weights,
+            )
+
+            submitted = sum(1 for o in results if o.status == "submitted")
+            errors = sum(1 for o in results if o.status.startswith("error"))
+            if not dry_run:
+                typer.echo(f"\n{submitted} orders submitted, {errors} errors")
+
+        if dry_run:
+            typer.echo("\nThis was a dry run. Use --no-dry-run to execute trades.")
+
+        log_file = _write_trade_log(
+            broker_mode=broker.mode,
+            dry_run=dry_run,
+            account=account,
+            picks=picks,
+            weighting=pipeline_config.weighting,
+            target_weights=target_weights,
+            previous_positions=list(current.keys()),
+            orders=orders,
+            extended_result=extended_result,
+            suffix=log_suffix,
+            extra=log_extra,
+            trade_dir=trade_dir,
+        )
+        typer.echo(f"Trade log: {log_file}")
+    finally:
+        # Always release the DuckDB handle, even on the empty-screen early exit
+        # (raise typer.Exit) — otherwise the cache file stays locked.
+        cache.close()
 
 
 @app.command()
@@ -519,6 +524,11 @@ def evaluate(
     tickers = _backtest_universe(cache, provider, pipeline_config.universe)
     price_data = cache.get_prices(tickers, str(start - timedelta(days=400)), str(end))
 
+    # SPY for the CAPM alpha/beta section (fetched up front so it's cached for the
+    # benchmark charts below too). Aligned to rebalance dates inside the report.
+    provider.get_prices(["SPY"], start - timedelta(days=10), end)
+    spy_prices = cache.get_prices(["SPY"], str(start - timedelta(days=10)), str(end))
+
     report = run_full_evaluation(
         pipeline=pipeline,
         pit_server=pit_server,
@@ -527,6 +537,7 @@ def evaluate(
         start_date=start,
         end_date=end,
         monte_carlo_iterations=monte_carlo,
+        benchmark_prices=spy_prices,
         **pipeline_config.backtest_kwargs(),
     )
 

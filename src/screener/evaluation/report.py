@@ -10,12 +10,18 @@ import polars as pl
 from dateutil.relativedelta import relativedelta
 
 from screener.backtest.metrics import (
+    AlphaBeta,
     BacktestMetrics,
+    compute_alpha_beta,
     compute_sharpe,
     periods_per_year,
 )
 from screener.backtest.pit_server import PITDataServer
-from screener.backtest.runner import _generate_rebalance_dates, run_backtest
+from screener.backtest.runner import (
+    _generate_rebalance_dates,
+    benchmark_period_returns,
+    run_backtest,
+)
 from screener.backtest.walkforward import (
     WalkForwardConfig,
     generate_folds,
@@ -105,6 +111,7 @@ class EvaluationReport:
     regime: RegimeResult
     walk_forward_folds: list[dict[str, Any]]
     walk_forward_consistency: float
+    capm: AlphaBeta | None = None  # CAPM alpha/beta vs SPY (None if no benchmark)
 
     def summary(self) -> str:
         sections = [
@@ -116,10 +123,18 @@ class EvaluationReport:
             self.strategy_metrics.summary(),
             f"Total return: {self.strategy_metrics.total_return:.2%}",
             "",
+        ]
+        if self.capm is not None:
+            sections += [
+                "--- Market Exposure (CAPM vs SPY) ---",
+                self.capm.summary(),
+                "",
+            ]
+        sections += [
             "--- Monte Carlo Significance ---",
             self.monte_carlo.summary(),
             "",
-            "--- Factor Attribution ---",
+            "--- Factor Attribution (market = equal-weight universe proxy) ---",
             self.factor_attribution.summary(),
             "",
             "--- Signal Correlations ---",
@@ -197,6 +212,17 @@ class EvaluationReport:
                 "consistency": self.walk_forward_consistency,
                 "folds": self.walk_forward_folds,
             },
+            "capm": (
+                {
+                    "beta": self.capm.beta,
+                    "alpha_annual": self.capm.alpha_annual,
+                    "t_alpha": self.capm.t_alpha,
+                    "r_squared": self.capm.r_squared,
+                    "n": self.capm.n,
+                }
+                if self.capm is not None
+                else None
+            ),
         }
 
 
@@ -645,8 +671,13 @@ def run_full_evaluation(
     hold_bonus: float = 0.0,
     weighting: str = "equal",
     frequency: str = "monthly",
+    benchmark_prices: pl.DataFrame | None = None,
 ) -> EvaluationReport:
-    """Run all evaluation analyses and produce a comprehensive report."""
+    """Run all evaluation analyses and produce a comprehensive report.
+
+    ``benchmark_prices`` (SPY ``date``+``close`` frame) enables the CAPM
+    alpha/beta section; omit it and ``capm`` stays ``None``.
+    """
     logger.info("Starting full evaluation...")
 
     # 1. Strategy backtest
@@ -664,6 +695,17 @@ def run_full_evaluation(
         hold_bonus=hold_bonus,
         weighting=weighting,
     )
+
+    # 1b. CAPM alpha/beta vs SPY (benchmark aligned to the rebalance intervals).
+    capm = None
+    if benchmark_prices is not None:
+        bench_r = benchmark_period_returns(benchmark_prices, start_date, end_date, frequency)
+        capm = compute_alpha_beta(
+            metrics.periodic_returns, bench_r, periods_per_year(frequency)
+        )
+        if capm is not None:
+            metrics.beta = capm.beta
+            metrics.alpha_annual = capm.alpha_annual
 
     # 2. Monte Carlo
     logger.info("Running Monte Carlo significance test...")
@@ -758,4 +800,5 @@ def run_full_evaluation(
         regime=regime,
         walk_forward_folds=fold_results,
         walk_forward_consistency=wf_consistency,
+        capm=capm,
     )

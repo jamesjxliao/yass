@@ -52,6 +52,39 @@ def _generate_rebalance_dates(
     return dates
 
 
+def benchmark_period_returns(
+    benchmark_prices: pl.DataFrame,
+    start: date,
+    end: date,
+    frequency: str = "monthly",
+) -> list[float]:
+    """Benchmark returns over the SAME holding intervals the backtest uses.
+
+    ``BacktestMetrics.periodic_returns[i]`` is the strategy's return over
+    ``[rebalance_dates[i], rebalance_dates[i+1]]``. To regress the strategy on a
+    benchmark (CAPM alpha/beta) or compute tracking error, the benchmark must be
+    measured over those exact intervals — NOT calendar-month buckets, which are
+    ~1 period out of phase and make a long-only equity book show spurious ~zero
+    correlation with its own index.
+
+    ``benchmark_prices`` needs ``date`` + ``close`` columns for one instrument
+    (e.g. SPY). The returned list aligns 1:1 with ``periodic_returns``; an
+    interval with no price on either side contributes 0.0 to keep the alignment.
+    """
+    if benchmark_prices.is_empty():
+        return []
+    bp = benchmark_prices.sort("date")
+    rebal = _generate_rebalance_dates(start, end, frequency)
+    closes: list[float | None] = []
+    for d in rebal:
+        sub = bp.filter(pl.col("date") <= d)  # last close on or before the rebalance date
+        closes.append(float(sub["close"][-1]) if len(sub) else None)
+    return [
+        (closes[i + 1] / closes[i] - 1) if (closes[i] and closes[i + 1]) else 0.0
+        for i in range(len(closes) - 1)
+    ]
+
+
 def _compute_turnover(prev_picks: set[str], new_picks: set[str]) -> float:
     """Fraction of positions that changed between rebalances.
 

@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from datetime import date
 
+import numpy as np
 import polars as pl
 import pytest
-from screener.backtest.runner import run_backtest
+from screener.backtest.metrics import compute_alpha_beta
+from screener.backtest.runner import benchmark_period_returns, run_backtest
 
 
 class _FakePipeline:
@@ -94,3 +96,39 @@ def test_delisted_pick_carries_to_last_trade():
     assert m.periodic_returns[0] == pytest.approx(0.21)
     # P1: no boundary close → carry to last trade (130/121 - 1), not dropped to 0
     assert m.periodic_returns[1] == pytest.approx(130 / 121 - 1)
+
+
+# --- benchmark alignment + CAPM alpha/beta ---------------------------------
+def test_benchmark_period_returns_uses_rebalance_intervals():
+    # +10% each month; rebalance dates are month-starts, so each holding-period
+    # return must be exactly 0.10 — measured over [rebal_i, rebal_{i+1}].
+    prices = pl.DataFrame({
+        "date": [date(2020, m, 1) for m in (1, 2, 3, 4)],
+        "close": [100.0, 110.0, 121.0, 133.1],
+    })
+    r = benchmark_period_returns(prices, date(2020, 1, 1), date(2020, 4, 1), "monthly")
+    assert len(r) == 3
+    assert all(x == pytest.approx(0.10) for x in r)
+
+
+def test_benchmark_period_returns_empty_frame():
+    empty = pl.DataFrame({"date": [], "close": []})
+    assert benchmark_period_returns(empty, date(2020, 1, 1), date(2020, 4, 1)) == []
+
+
+def test_compute_alpha_beta_recovers_known_params():
+    rng = np.random.default_rng(0)
+    x = rng.normal(0.01, 0.04, 200)
+    y = 0.008 + 1.3 * x + rng.normal(0, 0.001, 200)  # known alpha/beta + tiny noise
+    ab = compute_alpha_beta(y, x, periods_per_year=12)
+    assert ab is not None
+    assert ab.beta == pytest.approx(1.3, abs=0.05)
+    assert ab.alpha_period == pytest.approx(0.008, abs=0.002)
+    assert ab.alpha_annual == pytest.approx(ab.alpha_period * 12)
+    assert ab.r_squared > 0.95
+    assert ab.t_alpha > 1.98  # alpha solidly positive
+
+
+def test_compute_alpha_beta_guards():
+    assert compute_alpha_beta([0.1, 0.2], [0.1, 0.2]) is None  # < 3 periods
+    assert compute_alpha_beta([0.1, 0.2, 0.3], [0.05, 0.05, 0.05]) is None  # no variance
