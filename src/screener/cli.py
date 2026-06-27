@@ -439,7 +439,7 @@ def fetch_history(
         else:
             typer.echo(
                 "Warning: data/sp400/membership_history.json not found."
-                " Run scripts/build_sp400_universe.py first."
+                " Build the sp400 PIT membership first."
             )
 
     tickers = provider.get_universe(universe)
@@ -489,7 +489,7 @@ def fetch_history(
             f"⚠ PIT freshness: {len(stale)} ticker(s) overdue for a newer quarter "
             f"(FMP compute lag): {top}{' ...' if len(stale) > 8 else ''}"
         )
-        typer.echo("  Detail: poetry run python scripts/check_pit_staleness.py --verbose")
+        typer.echo("  (normal FMP compute lag — clears on the next fetch-history)")
     else:
         typer.echo("PIT freshness: all tickers current.")
 
