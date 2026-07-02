@@ -15,12 +15,16 @@ class Settings(BaseSettings):
     etoro_api_key: str = ""
     etoro_user_key: str = ""
     etoro_demo: bool = True
+    nasdaq_data_link_api_key: str = ""  # optional: Nasdaq Data Link (research data)
     db_path: Path = Path("data/screener.duckdb")
     cache_ttl_hours: int = 24
     default_universe: str = "sp500"
     project_root: Path = Path(".")
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    # extra="ignore": .env legitimately holds keys consumed by scripts outside
+    # Settings; an unknown entry must not brick every CLI command (pydantic's
+    # default extra="forbid" on env-file entries did exactly that).
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     @property
     def filters_dir(self) -> Path:
