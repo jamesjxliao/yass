@@ -9,6 +9,7 @@ import httpx
 import polars as pl
 
 from screener.data.cache import CacheManager
+from screener.data.splits import heal_split_prices
 
 logger = logging.getLogger(__name__)
 
@@ -554,52 +555,10 @@ class CachedFMPProvider:
             logger.info("Prices: all %d tickers fully cached", len(tickers))
 
         result = self._cache.get_prices(tickers, str(start), str(end))
-
-        split_tickers = self._detect_splits(result)
-        if split_tickers:
-            logger.info(
-                "Split detected for %s — re-fetching adjusted prices",
-                ", ".join(split_tickers),
-            )
-            for ticker in split_tickers:
-                # Re-fetch the FULL cached span, not just this call's window —
-                # invalidate_prices deletes ALL rows for the ticker, so a window-
-                # only re-fetch would truncate (e.g.) 10yr of history to ~400 days
-                # and silently corrupt the price cache the backtest is tuned on.
-                cr = self._cache.get_cached_price_range(ticker)
-                ref_start = min(start, date.fromisoformat(cr[0])) if cr else start
-                ref_end = max(end, date.fromisoformat(cr[1])) if cr else end
-                # Fetch BEFORE invalidating. get_prices_single swallows API errors
-                # and returns empty, so deleting first then getting an empty
-                # re-fetch would wipe the ticker's entire cached history with no
-                # replacement. Only clear-and-replace once real data is in hand;
-                # otherwise keep the (stale-split but non-empty) existing rows.
-                df = self._fmp.get_prices_single(ticker, ref_start, ref_end)
-                if not df.is_empty():
-                    self._cache.invalidate_prices([ticker])
-                    self._cache.store_prices(df, source="fmp")
-                else:
-                    logger.warning(
-                        "Split re-fetch for %s returned no data — keeping "
-                        "existing cache", ticker,
-                    )
-            result = self._cache.get_prices(tickers, str(start), str(end))
-
-        return result
-
-    @staticmethod
-    def _detect_splits(prices: pl.DataFrame) -> list[str]:
-        """Return tickers with day-over-day close changes > 40%, indicating stale split data."""
-        if prices.is_empty():
-            return []
-        sorted_p = prices.sort(["ticker", "date"])
-        with_ratio = sorted_p.with_columns(
-            (pl.col("close") / pl.col("close").shift(1).over("ticker")).alias("_ratio")
+        return heal_split_prices(
+            self._cache, result, tickers, start, end,
+            fetch_single=self._fmp.get_prices_single, source="fmp",
         )
-        suspect = with_ratio.filter(
-            (pl.col("_ratio") < 0.6) | (pl.col("_ratio") > 1.67)
-        )
-        return suspect["ticker"].unique().to_list()
 
     def get_universe(self, index: str) -> list[str]:
         data = self._cache.get_or_fetch(

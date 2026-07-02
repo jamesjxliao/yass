@@ -114,7 +114,7 @@ def test_split_refetch_failure_preserves_history():
 
     cache = CacheManager(":memory:")
     # Seed a full history whose last two closes look like a forward split
-    # (>40% single-day drop) so _detect_splits fires.
+    # (>40% single-day drop) so detect_splits fires.
     df = _make_price_df("BKNG", date(2024, 1, 2), 20)
     df = df.with_columns(
         pl.when(pl.col("date") == df["date"].max())
@@ -141,14 +141,14 @@ def test_split_refetch_failure_preserves_history():
 
 
 def test_detect_splits():
-    from screener.data.fmp import CachedFMPProvider
+    from screener.data.splits import detect_splits
 
     normal = pl.DataFrame({
         "ticker": ["AAPL"] * 5,
         "date": [date(2024, 1, i) for i in range(1, 6)],
         "close": [100.0, 101.0, 99.5, 102.0, 100.5],
     })
-    assert CachedFMPProvider._detect_splits(normal) == []
+    assert detect_splits(normal) == []
 
     # Forward split: price drops by half
     split = pl.DataFrame({
@@ -156,7 +156,7 @@ def test_detect_splits():
         "date": [date(2024, 6, i) for i in range(24, 29)],
         "close": [5500.0, 5520.0, 5480.0, 110.0, 112.0],
     })
-    assert CachedFMPProvider._detect_splits(split) == ["BKNG"]
+    assert detect_splits(split) == ["BKNG"]
 
     # Reverse split: price doubles
     reverse = pl.DataFrame({
@@ -164,15 +164,14 @@ def test_detect_splits():
         "date": [date(2024, 3, i) for i in range(1, 5)],
         "close": [5.0, 5.1, 15.0, 15.2],
     })
-    assert CachedFMPProvider._detect_splits(reverse) == ["XYZ"]
+    assert detect_splits(reverse) == ["XYZ"]
 
     # Mixed: one split, one normal
     mixed = pl.concat([normal, split])
-    result = sorted(CachedFMPProvider._detect_splits(mixed))
-    assert result == ["BKNG"]
+    assert sorted(detect_splits(mixed)) == ["BKNG"]
 
     # Empty
-    assert CachedFMPProvider._detect_splits(pl.DataFrame()) == []
+    assert detect_splits(pl.DataFrame()) == []
 
 
 def test_get_or_fetch_if_cached():

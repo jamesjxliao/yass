@@ -1,7 +1,7 @@
 """Sharadar provider: field computation, PIT stamping, membership, caching."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from unittest.mock import MagicMock
 
 import polars as pl
@@ -13,6 +13,7 @@ from screener.data.sharadar import (
     _snapshots_from_history,
     compute_arq_fields,
 )
+from screener.data.splits import detect_splits
 
 
 def _arq_row(**over):
@@ -148,6 +149,91 @@ def test_get_prices_gap_fill_caches_and_batches():
     # fully cached now — second call must not hit the API
     df2 = prov.get_prices(["AAA"], date(2024, 1, 2), date(2024, 1, 4))
     assert len(calls) == 1 and len(df2) == 3
+    cache.close()
+
+
+def _weekday_prices(ticker: str, start: date, n_days: int,
+                    close_fn) -> pl.DataFrame:
+    rows = []
+    i = 0
+    d = start
+    while i < n_days:
+        if d.weekday() < 5:
+            rows.append(dict(ticker=ticker, date=d, open=1.0, high=1.0,
+                             low=1.0, close=close_fn(i), volume=100.0))
+            i += 1
+        d += timedelta(days=1)
+    return pl.DataFrame(rows)
+
+
+def test_get_prices_split_heals_full_cached_span():
+    """SEP closes are retroactively split-adjusted: stale cached rows vs a
+    freshly fetched gap create a fake seam. The heal must re-fetch and replace
+    the FULL cached span — including rows before the requested window."""
+    cache = CacheManager(":memory:")
+    api = SharadarProvider(api_key="k")
+
+    # The true post-split series (smooth); the API serves this everywhere.
+    adjusted = _weekday_prices("NVDA", date(2024, 1, 1), 60,
+                               lambda i: 50.0 + i * 0.1)
+    days = adjusted["date"].to_list()
+
+    # Cache holds the first 30 rows at the old (pre-split, 3x) adjustment.
+    stale = adjusted.head(30).with_columns((pl.col("close") * 3.0).alias("close"))
+    cache.store_prices(stale, source="sharadar")
+
+    calls = []
+
+    def fake_prices(tickers, start, end):
+        calls.append((tuple(tickers), start, end))
+        return adjusted.filter(
+            pl.col("ticker").is_in(tickers)
+            & (pl.col("date") >= start) & (pl.col("date") <= end)
+        )
+
+    api.get_prices = fake_prices
+    prov = CachedSharadarProvider(api, cache)
+
+    # Request starts mid-cache: the gap fill appends new-scale rows after the
+    # stale ones, exposing the seam on the cache read.
+    result = prov.get_prices(["NVDA"], days[10], days[-1])
+
+    assert detect_splits(result) == []  # returned frame is seam-free
+    # Full cached span was replaced — rows before the request window too.
+    healed = cache.get_prices(["NVDA"], str(days[0]), str(days[-1]))
+    assert healed.sort("date")["close"].to_list() == adjusted["close"].to_list()
+    # The heal re-fetched from the cached start, not just the request start.
+    assert any(s <= days[0] and e >= days[-1] for (_, s, e) in calls)
+    cache.close()
+
+
+def test_get_prices_split_refetch_failure_preserves_history():
+    """A split-triggered re-fetch that returns empty (transient API failure)
+    must NOT wipe the ticker's existing cached history (mirrors the FMP test)."""
+    cache = CacheManager(":memory:")
+    # Seed a history whose final close is an engineered 3x drop so the
+    # detector fires on the cache read.
+    df = _weekday_prices("BKNG", date(2024, 1, 2), 20, lambda i: 100.0 + i)
+    df = df.with_columns(
+        pl.when(pl.col("date") == df["date"].max())
+        .then(pl.col("close") / 3.0)
+        .otherwise(pl.col("close"))
+        .alias("close")
+    )
+    cache.store_prices(df, source="sharadar")
+    n_before = len(cache.get_prices(["BKNG"], "2024-01-01", "2024-12-31"))
+    assert n_before > 0
+
+    api = SharadarProvider(api_key="k")
+    api.get_prices = MagicMock(return_value=pl.DataFrame())  # re-fetch fails
+    prov = CachedSharadarProvider(api, cache)
+
+    result = prov.get_prices(["BKNG"], date(2024, 1, 2), date(2024, 1, 31))
+
+    api.get_prices.assert_called()
+    assert cache.get_cached_price_range("BKNG") is not None
+    assert len(cache.get_prices(["BKNG"], "2024-01-01", "2024-12-31")) == n_before
+    assert not result.is_empty()
     cache.close()
 
 

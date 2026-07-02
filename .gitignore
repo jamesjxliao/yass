@@ -36,3 +36,8 @@ results/
 htmlcov/
 data/*.bak*
 data/*.duckdb.bak*
+
+# Lazy Prices experiment (checkpoints regenerable via fetch_lazy_prices.py)
+data/lazy_prices/*
+!data/lazy_prices/cik_overrides.json
+data/insider_sf2/checkpoints/

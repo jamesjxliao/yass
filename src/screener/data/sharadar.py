@@ -33,6 +33,7 @@ import httpx
 import polars as pl
 
 from screener.data.cache import CacheManager
+from screener.data.splits import heal_split_prices
 
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)  # api_key is a query param
@@ -485,7 +486,13 @@ class CachedSharadarProvider:
         if to_fetch_full or gaps:
             logger.info("Prices: fetched %d full + %d gap windows",
                         len(to_fetch_full), len(by_window))
-        return self._cache.get_prices(tickers, str(start), str(end))
+        result = self._cache.get_prices(tickers, str(start), str(end))
+        # SEP closes are retroactively split-adjusted: a new split leaves every
+        # cached row one adjustment behind the freshly fetched gap rows.
+        return heal_split_prices(
+            self._cache, result, tickers, start, end,
+            fetch_single=self._api.get_prices_single, source="sharadar",
+        )
 
     def get_prices_single(self, ticker: str, start: date, end: date) -> pl.DataFrame:
         return self.get_prices([ticker], start, end)
