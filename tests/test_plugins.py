@@ -5,7 +5,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 from screener.plugins.base import Filter, Signal
-from screener.plugins.loader import load_signals
+from screener.plugins.loader import load_filters, load_signals
 from screener.plugins.registry import discover_filters, discover_signals
 
 from tests.test_data.fixtures import make_fundamentals
@@ -19,6 +19,24 @@ def test_load_signals_zero_total_weight_raises():
     meaningless ranking (#26)."""
     with pytest.raises(ValueError):
         load_signals([{"name": "piotroski_f", "weight": 0.0}], SIGNALS_DIR)
+
+
+def test_load_filters_unknown_param_raises():
+    """A typo'd filter param (e.g. 'minvol' for 'min_vol') must raise, not run
+    the filter silently at its default threshold."""
+    with pytest.raises(ValueError, match="no parameter 'minvol'"):
+        load_filters(
+            [{"name": "low_volatility_filter", "params": {"minvol": 0.08}}],
+            FILTERS_DIR,
+        )
+
+
+def test_load_filters_valid_param_sets_attribute():
+    loaded = load_filters(
+        [{"name": "low_volatility_filter", "params": {"min_vol": 0.08}}],
+        FILTERS_DIR,
+    )
+    assert loaded[0].min_vol == 0.08
 
 
 def test_discover_filters():

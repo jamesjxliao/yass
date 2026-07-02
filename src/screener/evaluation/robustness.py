@@ -98,7 +98,10 @@ def deflated_sharpe_ratio(
 
 
 def _max_drawdown(rets: np.ndarray) -> float:
-    cum = np.cumprod(1 + rets)
+    # Prepend the starting equity (1.0) so a drawdown in the opening period(s) is
+    # captured; np.cumprod starts at 1+rets[0], hiding any decline before the
+    # first new equity high (biases the bootstrap MaxDD CI optimistic).
+    cum = np.concatenate([[1.0], np.cumprod(1 + rets)])
     peak = np.maximum.accumulate(cum)
     return float(np.min((cum - peak) / peak))
 

@@ -483,3 +483,37 @@ class TestExecuteOrdersUnclearedBuy:
         orders = [RebalanceOrder(ticker="NEW", side="buy", notional=5000)]
         result = broker.execute_orders(orders, dry_run=False)
         assert result[0].status == "submitted"
+
+
+class TestInstrumentCacheCollision:
+    """A held non-US instrument must not poison the forward buy-target cache."""
+
+    def test_reverse_lookup_does_not_clobber_forward_stock_mapping(self):
+        # Seagate stock is "STX.US" (iid 8543); Stacks crypto is bare "STX" (iid 999).
+        broker = EtoroBroker(api_key="k", user_key="u", demo=True)
+
+        def fake_search(**params):
+            if params.get("internalSymbolFull") == "STX":
+                # Forward search returns both; resolve_instrument_id must prefer .US
+                return [
+                    {"internalSymbolFull": "STX", "instrumentId": 999},
+                    {"internalSymbolFull": "STX.US", "instrumentId": 8543},
+                ]
+            if params.get("instrumentId") == 999:
+                return [{"internalSymbolFull": "STX", "instrumentId": 999}]
+            return []
+
+        broker._search_instruments = fake_search
+        # Account holds the crypto (bare "STX", iid 999) as an unresolved instrument.
+        broker.get_positions_detailed = MagicMock(return_value=[
+            EtoroPosition(position_id=1, instrument_id=999, ticker="ID:999",
+                          amount=1000, units=1.0, open_rate=1000.0, pnl=0),
+        ])
+
+        # Forward-resolve the pick, then reverse-resolve the held crypto.
+        broker.resolve_positions(candidate_tickers=["STX"])
+
+        # The buy target for "STX" must remain Seagate stock, not the crypto.
+        assert broker.resolve_instrument_id("STX") == 8543
+        # Reverse cache is still populated so the held position reports as STX.
+        assert broker._ticker_for_instrument(999) == "STX"

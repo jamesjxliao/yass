@@ -199,7 +199,14 @@ def compute_metrics_from_returns(
         n_years = len(periodic_returns) / periods_per_year
 
     sharpe = compute_sharpe(periodic_returns, periods_per_year)
-    max_dd = compute_max_drawdown(cumulative)
+    # Prepend the starting equity (1.0) before measuring drawdown: cum_prod()
+    # starts at 1+r[0], so a decline in the opening period(s) — before the first
+    # new equity high — would be invisible (peak would start already-down). The
+    # total_return above intentionally uses the un-prepended series.
+    equity_curve = (
+        pl.Series([1.0, *cumulative.to_list()]) if len(cumulative) else cumulative
+    )
+    max_dd = compute_max_drawdown(equity_curve)
     cagr = compute_cagr(total_return, n_years)
     calmar = cagr / abs(max_dd) if max_dd != 0 else 0.0
 

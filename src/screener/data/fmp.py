@@ -12,6 +12,12 @@ from screener.data.cache import CacheManager
 
 logger = logging.getLogger(__name__)
 
+# FMP requires the API key as a query parameter (?apikey=...). httpx logs every
+# request URL — including that key — at INFO level, which leaked the real key into
+# stderr-captured debug logs. Silence httpx's request logging so the key never
+# reaches any log sink; warnings/errors still propagate.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 BASE_URL = "https://financialmodelingprep.com/stable"
 MAX_CALLS_PER_MINUTE = 720  # FMP limit is 750, leave margin
 
@@ -271,7 +277,12 @@ class FMPProvider:
                 logger.warning("Failed to fetch profile for %s", ticker)
         if not rows:
             return pl.DataFrame()
-        return _normalize_fundamentals(pl.DataFrame(rows))
+        # infer_schema_length=None: scan ALL rows for the schema. These per-ticker
+        # dicts have conditional keys (analyst_target, the quarterly key-metrics
+        # family, growth fields only when the year-ago value is positive, ...), so
+        # the default 100-row inference would silently DROP any column that first
+        # appears after row 100 — for the entire universe.
+        return _normalize_fundamentals(pl.DataFrame(rows, infer_schema_length=None))
 
     def get_prices_single(self, ticker: str, start: date, end: date) -> pl.DataFrame:
         """Fetch historical EOD prices for a single ticker."""
@@ -308,7 +319,18 @@ class FMPProvider:
         return pl.concat(frames)
 
     def get_universe(self, index: str) -> list[str]:
-        """Get index constituents. Falls back to hardcoded list."""
+        """Get index constituents.
+
+        On a genuine plan/permission restriction (401/403/404) fall back to the
+        frozen hardcoded list — the intended steady state on restricted plans.
+        But on a TRANSIENT failure (5xx / network / timeout) RAISE rather than
+        return the stale fallback: CachedFMPProvider.get_universe caches this
+        result for 30 days and UniverseManager.sync rewrites the survivorship-safe
+        PIT membership table from it, so silently substituting a ~2022 list would
+        corrupt both the live universe cache and the membership table. Raising lets
+        get_or_fetch skip caching (it writes only after fetch_fn returns) and the
+        run fail loudly so it can be retried.
+        """
         endpoint_map = {
             "sp500": "sp500-constituent",
             "nasdaq100": "nasdaq-constituent",
@@ -319,8 +341,17 @@ class FMPProvider:
                 data = self._get(endpoint_map[index])
                 if isinstance(data, list) and data:
                     return [row["symbol"] for row in data]
-            except (httpx.HTTPError, httpx.HTTPStatusError):
-                logger.warning("Constituent endpoint restricted, using hardcoded list")
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code if e.response is not None else None
+                if status not in (401, 403, 404):
+                    raise  # transient/server error — do NOT cache a stale fallback
+                logger.warning(
+                    "Constituent endpoint restricted (HTTP %s), using hardcoded list",
+                    status,
+                )
+            # Non-status httpx.HTTPError (timeout/connect) propagates uncaught: it is
+            # transient, and caching the fallback under it is exactly the poisoning
+            # we must avoid.
 
         fallback_map = {
             "sp500": _SP500_TICKERS,
@@ -482,7 +513,11 @@ class CachedFMPProvider:
 
         if not cached_rows:
             return pl.DataFrame()
-        return _normalize_fundamentals(pl.DataFrame(cached_rows))
+        # infer_schema_length=None so a conditionally-present column that first
+        # appears after row 100 is not silently dropped (see get_fundamentals).
+        return _normalize_fundamentals(
+            pl.DataFrame(cached_rows, infer_schema_length=None)
+        )
 
     def get_prices(self, tickers: list[str], start: date, end: date) -> pl.DataFrame:
         """Fetch prices with incremental gap-fill. Only fetches what's missing."""
@@ -534,10 +569,20 @@ class CachedFMPProvider:
                 cr = self._cache.get_cached_price_range(ticker)
                 ref_start = min(start, date.fromisoformat(cr[0])) if cr else start
                 ref_end = max(end, date.fromisoformat(cr[1])) if cr else end
-                self._cache.invalidate_prices([ticker])
+                # Fetch BEFORE invalidating. get_prices_single swallows API errors
+                # and returns empty, so deleting first then getting an empty
+                # re-fetch would wipe the ticker's entire cached history with no
+                # replacement. Only clear-and-replace once real data is in hand;
+                # otherwise keep the (stale-split but non-empty) existing rows.
                 df = self._fmp.get_prices_single(ticker, ref_start, ref_end)
                 if not df.is_empty():
+                    self._cache.invalidate_prices([ticker])
                     self._cache.store_prices(df, source="fmp")
+                else:
+                    logger.warning(
+                        "Split re-fetch for %s returned no data — keeping "
+                        "existing cache", ticker,
+                    )
             result = self._cache.get_prices(tickers, str(start), str(end))
 
         return result

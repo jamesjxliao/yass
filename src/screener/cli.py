@@ -184,35 +184,64 @@ def _run_rebalance(
         if finalize_picks is not None:
             picks = finalize_picks(result, picks)
 
+        # The screen was non-empty (guarded above), so picks started with top_n
+        # names. If finalize_picks dropped every one, the broker could not resolve
+        # ANY target instrument — an outage/format change, never a legitimate
+        # "hold nothing" signal. Aborting here prevents compute_rebalance_orders([])
+        # from emitting a full-exit sell for every held position (whole-account
+        # liquidation with no buys).
+        if not picks:
+            typer.echo(
+                "ERROR: no target instruments could be resolved for any pick "
+                "(possible broker/market-data outage). Aborting without trading."
+            )
+            raise typer.Exit(1)
+
         target_weights = _resolve_target_weights(
             result, pipeline_config.weighting, picks
         )
         orders = broker.compute_rebalance_orders(picks, account, target_weights)
 
-        if not orders:
-            typer.echo("Portfolio already balanced — no trades needed")
-        else:
-            typer.echo(f"\nOrders ({'DRY RUN' if dry_run else 'LIVE'}):")
-            for o in orders:
-                typer.echo(f"  {o.side.upper():<5} {o.ticker:<6} ${o.notional:>10,.2f}")
+        # Once orders are computed the trade log MUST be written even if
+        # execute_orders raises mid-flight (e.g. a 5xx on a post-sell re-read
+        # after sells already executed) — otherwise real submitted orders leave
+        # no results/trades record to reconcile against the broker. Capture any
+        # execution error, always write the log (annotated), then re-raise.
+        execution_error: Exception | None = None
+        try:
+            if not orders:
+                typer.echo("Portfolio already balanced — no trades needed")
+            else:
+                typer.echo(f"\nOrders ({'DRY RUN' if dry_run else 'LIVE'}):")
+                for o in orders:
+                    typer.echo(f"  {o.side.upper():<5} {o.ticker:<6} ${o.notional:>10,.2f}")
 
-            if not dry_run and is_live_real:
-                typer.echo(f"\n{live_warning}")
+                if not dry_run and is_live_real:
+                    typer.echo(f"\n{live_warning}")
 
-            results = broker.execute_orders(
-                orders, dry_run=dry_run,
-                stop_loss_pct=pipeline_config.position_stop_loss,
-                target_weights=target_weights,
+                results = broker.execute_orders(
+                    orders, dry_run=dry_run,
+                    stop_loss_pct=pipeline_config.position_stop_loss,
+                    target_weights=target_weights,
+                )
+
+                submitted = sum(1 for o in results if o.status == "submitted")
+                errors = sum(1 for o in results if o.status.startswith("error"))
+                if not dry_run:
+                    typer.echo(f"\n{submitted} orders submitted, {errors} errors")
+
+            if dry_run:
+                typer.echo("\nThis was a dry run. Use --no-dry-run to execute trades.")
+        except Exception as e:  # noqa: BLE001 — record then re-raise below
+            execution_error = e
+            typer.echo(
+                f"\nERROR during execution: {e!r}\n"
+                "Writing trade log with the attempted orders before aborting."
             )
 
-            submitted = sum(1 for o in results if o.status == "submitted")
-            errors = sum(1 for o in results if o.status.startswith("error"))
-            if not dry_run:
-                typer.echo(f"\n{submitted} orders submitted, {errors} errors")
-
-        if dry_run:
-            typer.echo("\nThis was a dry run. Use --no-dry-run to execute trades.")
-
+        log_extra_final = dict(log_extra or {})
+        if execution_error is not None:
+            log_extra_final["execution_error"] = repr(execution_error)
         log_file = _write_trade_log(
             broker_mode=broker.mode,
             dry_run=dry_run,
@@ -224,10 +253,12 @@ def _run_rebalance(
             orders=orders,
             extended_result=extended_result,
             suffix=log_suffix,
-            extra=log_extra,
+            extra=log_extra_final,
             trade_dir=trade_dir,
         )
         typer.echo(f"Trade log: {log_file}")
+        if execution_error is not None:
+            raise execution_error
     finally:
         # Always release the DuckDB handle, even on the empty-screen early exit
         # (raise typer.Exit) — otherwise the cache file stays locked.
@@ -270,8 +301,15 @@ def screen(
             pipeline_config.universe, as_of_date
         )
         df = pit_server.get_screening_data(tickers, as_of_date)
+        # End the price window the day BEFORE as_of_date: cache.get_prices is
+        # end-inclusive, so ending at as_of_date would feed that day's own close
+        # into momentum/SMA/vol — one day of lookahead vs the backtest's strict
+        # `date < rebal` cutoff, so `screen --as-of D` would not reproduce what the
+        # backtest screened for rebalance D.
         prices = cache.get_prices(
-            tickers, str(as_of_date - timedelta(days=400)), str(as_of_date)
+            tickers,
+            str(as_of_date - timedelta(days=400)),
+            str(as_of_date - timedelta(days=1)),
         )
         df = enrich_with_price_data(df, prices)
         typer.echo(f"Screening as of {as_of_date} ({len(tickers)} tickers)")
@@ -317,7 +355,7 @@ def backtest(
     config: Annotated[Path, typer.Option(help="Config YAML")] = Path("config/default.yaml"),
     start_date: Annotated[str, typer.Option(help="Backtest start date")] = "2017-01-01",
     end_date: Annotated[str, typer.Option(help="Backtest end date")] = "2026-01-01",
-    top_n: Annotated[int, typer.Option()] = 10,
+    top_n: Annotated[int | None, typer.Option(help="Override config top_n")] = None,
     verbose: Annotated[bool, typer.Option("--verbose")] = False,
 ) -> None:
     """Run backtest on a screening config."""
@@ -327,7 +365,10 @@ def backtest(
 
     settings = Settings()
     pipeline_config = PipelineConfig.from_yaml(config)
-    pipeline = _build_pipeline(pipeline_config, settings, top_n=top_n)
+    # Honor the config's top_n unless explicitly overridden on the CLI (matches
+    # lab/evaluate; the old hardcoded default of 10 silently overrode the config).
+    effective_top_n = top_n if top_n is not None else pipeline_config.top_n
+    pipeline = _build_pipeline(pipeline_config, settings, top_n=effective_top_n)
 
     provider, cache = _make_provider(settings)
     pit_server = _make_pit_server(provider, cache, pipeline_config)

@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import polars as pl
 import pytest
+import typer
 from screener.cli import _run_rebalance
 from screener.trading.broker import AlpacaBroker, RebalanceOrder
 
@@ -108,6 +109,62 @@ def test_run_rebalance_etoro_drops_unresolved(tmp_path):
     log = json.loads(next(tmp_path.glob("*_etoro.json")).read_text())
     assert log["broker"] == "etoro"
     assert log["picks"] == ["AAPL"]
+
+
+def test_run_rebalance_aborts_when_all_picks_unresolved(tmp_path):
+    """If finalize_picks drops EVERY pick (broker/market-data outage), abort —
+    never fall through to compute_rebalance_orders([]) (full-account liquidation)."""
+    broker = MagicMock()
+    broker.mode = "demo"
+    broker.get_account.return_value = {"equity": 10000, "cash": 5000}
+    broker.resolve_positions.return_value = {"AAPL": 4000}
+    cache = MagicMock()
+    pipe = _pipeline()
+
+    with pytest.raises(typer.Exit) as exc:
+        _run_rebalance(
+            broker=broker, provider=_provider(), cache=cache, pipeline=pipe,
+            pipeline_config=_Cfg(), dry_run=False,
+            get_holdings=lambda enriched: broker.resolve_positions(["AAPL"]),
+            finalize_picks=lambda result, picks: [],  # nothing resolves
+            is_live_real=True, live_warning="X",
+            log_suffix="_etoro", trade_dir=tmp_path,
+        )
+
+    assert exc.value.exit_code == 1
+    broker.compute_rebalance_orders.assert_not_called()
+    broker.execute_orders.assert_not_called()
+    cache.close.assert_called_once()          # cache still released via finally
+    assert not list(tmp_path.glob("*.json"))  # no trade log written
+
+
+def test_run_rebalance_writes_log_when_execution_raises(tmp_path):
+    """If execute_orders raises after orders were computed (e.g. a 5xx on a
+    post-sell re-read), the trade log MUST still be written (annotated with the
+    error) and the exception must propagate."""
+    broker = MagicMock()
+    broker.mode = "paper"
+    broker.get_account.return_value = {"equity": 10000, "cash": 5000}
+    broker.get_positions.return_value = {"AAPL": 4000}
+    order = RebalanceOrder(ticker="MSFT", side="buy", notional=1000.0)
+    broker.compute_rebalance_orders.return_value = [order]
+    broker.execute_orders.side_effect = RuntimeError("500 on post-sell re-read")
+    cache = MagicMock()
+
+    with pytest.raises(RuntimeError, match="post-sell re-read"):
+        _run_rebalance(
+            broker=broker, provider=_provider(), cache=cache, pipeline=_pipeline(),
+            pipeline_config=_Cfg(), dry_run=False,
+            get_holdings=lambda enriched: broker.get_positions(),
+            is_live_real=False, live_warning="X", trade_dir=tmp_path,
+        )
+
+    logs = list(tmp_path.glob("*.json"))
+    assert len(logs) == 1                        # log written despite the raise
+    log = json.loads(logs[0].read_text())
+    assert "500 on post-sell re-read" in log["execution_error"]
+    assert log["picks"] == ["AAPL", "MSFT"]
+    cache.close.assert_called_once()
 
 
 class _InverseVolCfg:

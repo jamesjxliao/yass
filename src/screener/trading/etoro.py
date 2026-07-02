@@ -225,7 +225,13 @@ class EtoroBroker:
             symbol = items[0].get("internalSymbolFull", "")
             ticker = symbol.removesuffix(".US") if symbol else None
             if ticker:
-                self._cache_instrument(ticker, instrument_id)
+                # Populate ONLY the reverse cache. Writing the forward cache here
+                # would let a held non-US instrument whose bare symbol collides with
+                # a screener ticker (e.g. Stacks crypto "STX" vs Seagate "STX.US")
+                # overwrite the correct forward mapping, so a later buy for that
+                # ticker would open the wrong asset. The forward cache is populated
+                # only by resolve_instrument_id, which prefers the "{ticker}.US" stock.
+                self._reverse_instrument_cache[instrument_id] = ticker
             return ticker
         return None
 

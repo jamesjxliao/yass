@@ -105,6 +105,41 @@ def test_invalidate_prices():
     cache.close()
 
 
+def test_split_refetch_failure_preserves_history():
+    """A split-triggered re-fetch that returns empty (transient API failure) must
+    NOT wipe the ticker's existing cached history."""
+    from unittest.mock import MagicMock
+
+    from screener.data.fmp import CachedFMPProvider, FMPProvider
+
+    cache = CacheManager(":memory:")
+    # Seed a full history whose last two closes look like a forward split
+    # (>40% single-day drop) so _detect_splits fires.
+    df = _make_price_df("BKNG", date(2024, 1, 2), 20)
+    df = df.with_columns(
+        pl.when(pl.col("date") == df["date"].max())
+        .then(pl.col("close") / 3.0)  # engineered split-day drop
+        .otherwise(pl.col("close"))
+        .alias("close")
+    )
+    cache.store_prices(df, source="test")
+    n_before = len(cache.get_prices(["BKNG"], "2024-01-01", "2024-12-31"))
+    assert n_before > 0
+
+    fmp = FMPProvider(api_key="k")
+    fmp.get_prices_single = MagicMock(return_value=pl.DataFrame())  # re-fetch fails
+    provider = CachedFMPProvider(fmp, cache)
+
+    result = provider.get_prices(["BKNG"], date(2024, 1, 2), date(2024, 1, 31))
+
+    # Re-fetch was attempted, but the empty result must leave history intact.
+    fmp.get_prices_single.assert_called()
+    assert cache.get_cached_price_range("BKNG") is not None
+    assert len(cache.get_prices(["BKNG"], "2024-01-01", "2024-12-31")) == n_before
+    assert not result.is_empty()
+    cache.close()
+
+
 def test_detect_splits():
     from screener.data.fmp import CachedFMPProvider
 

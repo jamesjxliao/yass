@@ -38,10 +38,17 @@ def load_filters(
         if params and hasattr(plugin, "configure"):
             plugin.configure(**params)
         elif params:
-            # Try setting attributes directly
+            # Set attributes directly. A param that matches no existing attribute
+            # is a typo (e.g. "minvol" for "min_vol") — raise instead of silently
+            # dropping it and running the filter at its default threshold, matching
+            # the fail-fast policy for unknown filter/signal NAMES above.
             for k, v in params.items():
-                if hasattr(plugin, k):
-                    setattr(plugin, k, v)
+                if not hasattr(plugin, k):
+                    raise ValueError(
+                        f"Filter '{name}' has no parameter '{k}' "
+                        f"(check config/ for a typo)."
+                    )
+                setattr(plugin, k, v)
 
         loaded.append(plugin)
 

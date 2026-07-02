@@ -31,6 +31,21 @@ class Settings(BaseSettings):
         return self.project_root / "signals"
 
 
+# The rebalance cadences runner._generate_rebalance_dates actually distinguishes.
+# Anything else silently falls into its monthly `else` branch, so validate against
+# this set rather than letting a typo (e.g. "quartely") run at monthly cadence.
+VALID_FREQUENCIES = frozenset({"weekly", "monthly", "quarterly"})
+
+# Recognized top-level YAML keys. from_yaml raises on anything else so a typo
+# (e.g. "weigthing", "hold_bonuss", "max_per_sectors") fails loudly instead of
+# silently falling back to the default — the same fail-fast policy load_signals
+# applies to unknown signal names.
+_KNOWN_CONFIG_KEYS = frozenset({
+    "filters", "signals", "universe", "top_n", "rebalance_frequency",
+    "max_per_sector", "position_stop_loss", "hold_bonus", "weighting",
+})
+
+
 class PipelineConfig:
     """Loaded from a YAML config file defining which filters/signals to use."""
 
@@ -64,6 +79,12 @@ class PipelineConfig:
             )
         self.weighting = weighting
 
+        if rebalance_frequency not in VALID_FREQUENCIES:
+            raise ValueError(
+                f"Unknown rebalance_frequency {rebalance_frequency!r}. "
+                f"Valid: {sorted(VALID_FREQUENCIES)}"
+            )
+
     def backtest_kwargs(self) -> dict[str, Any]:
         """The per-config knobs threaded into run_backtest / run_full_evaluation.
 
@@ -82,7 +103,13 @@ class PipelineConfig:
     @classmethod
     def from_yaml(cls, path: Path) -> PipelineConfig:
         with open(path) as f:
-            data = yaml.safe_load(f)
+            data = yaml.safe_load(f) or {}
+        unknown = set(data) - _KNOWN_CONFIG_KEYS
+        if unknown:
+            raise ValueError(
+                f"Unknown config key(s) in {path}: {sorted(unknown)}. "
+                f"Valid keys: {sorted(_KNOWN_CONFIG_KEYS)}"
+            )
         return cls(
             filters=data.get("filters", []),
             signals=data.get("signals", []),

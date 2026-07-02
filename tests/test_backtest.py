@@ -44,6 +44,18 @@ def test_max_drawdown():
     assert abs(dd - (-0.25)) < 0.01  # 0.9/1.2 - 1 = -0.25
 
 
+def test_max_drawdown_captures_opening_loss():
+    # A drawdown in the opening period(s) — before any new equity high — must be
+    # counted. compute_metrics_from_returns prepends the starting 1.0 equity so
+    # cum_prod (which starts at 1+r[0]) does not hide it.
+    m = compute_metrics_from_returns(pl.Series([-0.30, 0.10, 0.05]))
+    assert abs(m.max_drawdown - (-0.30)) < 1e-9   # true -30%, not 0.0
+
+    m2 = compute_metrics_from_returns(pl.Series([-0.10, -0.15, 0.20]))
+    # 0.9 * 0.85 = 0.765 → -23.5% from the 1.0 start, not -15%
+    assert abs(m2.max_drawdown - (-0.235)) < 1e-9
+
+
 def test_psr():
     # High Sharpe with many observations should have high PSR
     psr = compute_psr(sharpe=2.0, n=120)

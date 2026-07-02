@@ -23,6 +23,23 @@ def test_unknown_weighting_raises(tmp_path):
         PipelineConfig.from_yaml(p)
 
 
+def test_unknown_top_level_key_raises(tmp_path):
+    """A misspelled top-level key (e.g. 'weigthing') must fail loudly, not
+    silently fall back to the default."""
+    p = tmp_path / "c.yaml"
+    p.write_text("weigthing: inverse_vol\nsignals: []\nfilters: []\n")
+    with pytest.raises(ValueError, match="Unknown config key"):
+        PipelineConfig.from_yaml(p)
+
+
+def test_unknown_rebalance_frequency_raises(tmp_path):
+    """A typo'd frequency ('quartely') must raise, not silently run monthly."""
+    p = tmp_path / "c.yaml"
+    p.write_text("rebalance_frequency: quartely\nsignals: []\nfilters: []\n")
+    with pytest.raises(ValueError, match="rebalance_frequency"):
+        PipelineConfig.from_yaml(p)
+
+
 def test_backtest_kwargs_bundle_maps_frequency():
     """backtest_kwargs() bundles the run_backtest knobs and maps the config's
     rebalance_frequency onto run_backtest's `frequency` parameter."""
