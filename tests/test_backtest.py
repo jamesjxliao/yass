@@ -113,7 +113,7 @@ def test_backtest_with_mock_data():
     signals_registry = discover_signals(SIGNALS_DIR)
     signals_with_weights = [
         (signals_registry["momentum_12m"], 0.5),
-        (signals_registry["value_composite"], 0.5),
+        (signals_registry["low_leverage_growth"], 0.5),
     ]
 
     pipeline = ScreeningPipeline(

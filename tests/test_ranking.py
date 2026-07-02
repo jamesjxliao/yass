@@ -56,7 +56,7 @@ def test_composite_score_with_real_plugins():
     signals_registry = discover_signals(SIGNALS_DIR)
     signals_with_weights = [
         (signals_registry["momentum_12m"], 0.4),
-        (signals_registry["value_composite"], 0.35),
+        (signals_registry["low_leverage_growth"], 0.35),
         (signals_registry["quality_score"], 0.25),
     ]
     df = make_fundamentals(10)
@@ -64,7 +64,7 @@ def test_composite_score_with_real_plugins():
 
     assert "composite_score" in result.columns
     assert "z_momentum_12m" in result.columns
-    assert "z_value_composite" in result.columns
+    assert "z_low_leverage_growth" in result.columns
     assert "z_quality_score" in result.columns
     assert len(result) == 10
 
@@ -74,7 +74,7 @@ def test_pipeline_end_to_end():
     signals_registry = discover_signals(SIGNALS_DIR)
     signals_with_weights = [
         (signals_registry["momentum_12m"], 0.5),
-        (signals_registry["value_composite"], 0.5),
+        (signals_registry["low_leverage_growth"], 0.5),
     ]
 
     pipeline = ScreeningPipeline(
@@ -98,7 +98,7 @@ def test_pipeline_sector_cap():
     signals_registry = discover_signals(SIGNALS_DIR)
     signals_with_weights = [
         (signals_registry["momentum_12m"], 0.5),
-        (signals_registry["value_composite"], 0.5),
+        (signals_registry["low_leverage_growth"], 0.5),
     ]
 
     pipeline = ScreeningPipeline(

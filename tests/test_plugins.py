@@ -41,10 +41,9 @@ def test_load_filters_valid_param_sets_attribute():
 
 def test_discover_filters():
     filters = discover_filters(FILTERS_DIR)
-    assert len(filters) == 4
+    assert len(filters) == 3
     assert "market_cap_filter" in filters
     assert "volume_filter" in filters
-    assert "price_above_sma" in filters
     assert "low_volatility_filter" in filters
 
 
@@ -52,7 +51,7 @@ def test_discover_signals():
     signals = discover_signals(SIGNALS_DIR)
     assert len(signals) >= 3
     assert "momentum_12m" in signals
-    assert "value_composite" in signals
+    assert "low_leverage_growth" in signals
     assert "quality_score" in signals
 
 
@@ -88,30 +87,15 @@ def test_signal_protocol_check():
         assert hasattr(s, "higher_is_better")
 
 
-def test_efficiency_acceleration_signal():
-    from signals.efficiency_acceleration import EfficiencyAccelerationSignal
-
-    signal = EfficiencyAccelerationSignal()
-    df = make_fundamentals(10)
-    result = signal.compute(df)
-    assert len(result) == 10
-    # All values should be in [0, 1] range (normalized)
-    assert result.min() >= 0.0  # type: ignore[operator]
-    assert result.max() <= 1.0  # type: ignore[operator]
-    # With varied inputs, should not be all identical
-    assert result.n_unique() > 1
-
-
-def test_efficiency_acceleration_missing_columns():
-    """Signal should gracefully handle missing columns."""
-    from signals.efficiency_acceleration import EfficiencyAccelerationSignal
-
-    signal = EfficiencyAccelerationSignal()
+def test_signals_handle_missing_columns():
+    """EVERY discovered signal must degrade gracefully on a minimal frame —
+    live data can lack any field, and consumers are expected to column-guard
+    (this generalizes the old efficiency_acceleration-specific test)."""
+    signals = discover_signals(SIGNALS_DIR)
     df = pl.DataFrame({"ticker": ["A", "B", "C"], "close": [100.0, 200.0, 300.0]})
-    result = signal.compute(df)
-    assert len(result) == 3
-    # Should return 0.5 fallback
-    assert result[0] == 0.5
+    for name, s in signals.items():
+        result = s.compute(df)
+        assert len(result) == 3, f"Signal {name} returned wrong length"
 
 
 def test_market_cap_filter_threshold():
