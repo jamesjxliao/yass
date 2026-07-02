@@ -36,12 +36,6 @@ pytest = "^8.0"
 ruff = "^0.5"
 pytest-cov = "^7.1.0"
 
-[tool.poetry.group.backtest]
-optional = true
-
-[tool.poetry.group.backtest.dependencies]
-vectorbt = ">=0.26"
-
 [tool.coverage.run]
 source = ["src/screener", "signals", "filters"]
 # Omit the integration/IO/presentation layers that are exercised manually or via

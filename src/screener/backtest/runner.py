@@ -12,12 +12,6 @@ from screener.backtest.metrics import (
     periods_per_year,
 )
 from screener.backtest.pit_server import PITDataServer
-from screener.backtest.walkforward import (
-    FoldResult,
-    WalkForwardConfig,
-    compute_walk_forward_consistency,
-    generate_folds,
-)
 from screener.engine.pipeline import ScreeningPipeline, enrich_with_price_data
 from screener.engine.weighting import compute_weights
 
@@ -304,69 +298,3 @@ def run_backtest(
         n_years=n_years,
         total_swaps=total_swaps,
     )
-
-
-def run_walk_forward(
-    pipeline: ScreeningPipeline,
-    pit_server: PITDataServer,
-    price_data: pl.DataFrame,
-    universe_index: str,
-    config: WalkForwardConfig,
-    transaction_cost_bps: float = 10.0,
-    frequency: str = "monthly",
-    position_stop_loss: float = 0.0,
-    hold_bonus: float = 0.0,
-    weighting: str = "equal",
-) -> tuple[list[FoldResult], BacktestMetrics]:
-    """Run walk-forward analysis across multiple folds."""
-    folds = generate_folds(config)
-    fold_results = []
-
-    risk_params = {
-        "transaction_cost_bps": transaction_cost_bps,
-        "weighting": weighting,
-        "frequency": frequency,
-        "position_stop_loss": position_stop_loss,
-        "hold_bonus": hold_bonus,
-    }
-
-    for i, (train_start, train_end, test_start, test_end) in enumerate(folds):
-        logger.info(
-            "Fold %d: train %s-%s, test %s-%s",
-            i, train_start, train_end, test_start, test_end,
-        )
-
-        metrics = run_backtest(
-            pipeline=pipeline,
-            pit_server=pit_server,
-            price_data=price_data,
-            universe_index=universe_index,
-            start_date=test_start,
-            end_date=test_end,
-            **risk_params,
-        )
-
-        fold_results.append(FoldResult(
-            fold_index=i,
-            train_start=train_start,
-            train_end=train_end,
-            test_start=test_start,
-            test_end=test_end,
-            metrics=metrics,
-        ))
-
-    # Aggregate metrics over full out-of-sample period
-    all_test_start = min(f.test_start for f in fold_results)
-    all_test_end = max(f.test_end for f in fold_results)
-    aggregate = run_backtest(
-        pipeline=pipeline,
-        pit_server=pit_server,
-        price_data=price_data,
-        universe_index=universe_index,
-        start_date=all_test_start,
-        end_date=all_test_end,
-        **risk_params,
-    )
-    aggregate.walk_forward_consistency = compute_walk_forward_consistency(fold_results)
-
-    return fold_results, aggregate
