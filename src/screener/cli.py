@@ -30,10 +30,16 @@ def _setup_logging(verbose: bool) -> None:
 def _make_provider(settings: Settings):
     """Build the provider (via the shared harness) and echo the CLI selection."""
     provider, cache = make_provider(settings)
-    if settings.fmp_api_key:
+    name = type(provider).__name__
+    if "Sharadar" in name:
+        typer.echo("Using Sharadar provider (cached)")
+    elif "FMP" in name:
         typer.echo("Using FMP provider (cached)")
     else:
-        typer.echo("Using mock provider (set FMP_API_KEY in .env for real data)")
+        typer.echo(
+            "Using mock provider (set NASDAQ_DATA_LINK_API_KEY or FMP_API_KEY "
+            "in .env for real data)"
+        )
     return provider, cache
 
 
@@ -445,6 +451,64 @@ def run_research(
     cache.close()
 
 
+def _fetch_history_sharadar(provider, cache, universe: str, years: int) -> None:
+    """Sharadar fetch-history: full membership + PIT + prices + sectors.
+
+    Table-oriented batching (~2 calls per 50 tickers) instead of FMP's ~7 calls
+    per ticker — a full 10yr refresh runs in minutes, not half an hour."""
+    if universe != "sp500":
+        typer.echo("Sharadar provider supports the sp500 universe only.")
+        raise typer.Exit(1)
+
+    typer.echo("Syncing survivorship-free sp500 membership (events since 1957)...")
+    n = provider.sync_membership()
+    typer.echo(f"  {n} membership stints loaded")
+
+    # Every ticker whose stint overlaps the requested window gets PIT + prices,
+    # so backtests over the window are survivorship-free out of the box.
+    window_start = date.today() - timedelta(days=int(365.25 * years))
+    members = cache.to_polars(
+        """SELECT DISTINCT ticker FROM universe_membership
+           WHERE index_name='sp500'
+             AND (removed_date IS NULL OR removed_date >= ?)""",
+        [str(window_start)],
+    )["ticker"].to_list()
+    typer.echo(f"Fetching {years}yr history for {len(members)} members (incl. departed)...")
+
+    typer.echo("Fetching PIT fundamentals (batched)...")
+    snaps = provider.collect_pit_snapshots_bulk(
+        members, years,
+        progress=lambda i, n: typer.echo(f"  batch {i}/{n}") if i % 6 == 0 else None,
+    )
+    cache.bulk_store_pit_snapshots(snaps)
+    typer.echo(f"Stored {len(snaps)} PIT snapshots")
+
+    yesterday = date.today() - timedelta(days=1)
+    typer.echo(f"Fetching prices {window_start} to {yesterday} (incremental)...")
+    provider.get_prices(members, window_start, yesterday)
+    typer.echo("Fetching benchmark ETF prices (SPY, QQQ)...")
+    provider.get_prices(["SPY", "QQQ"], window_start, yesterday)
+
+    typer.echo("Storing sectors...")
+    provider.store_sectors(members)
+
+    typer.echo("Warming fundamentals cache...")
+    current = provider.get_universe(universe)
+    provider.get_fundamentals(current)
+
+    from screener.data.staleness import find_stale_quarters
+
+    stale = find_stale_quarters(cache)
+    if stale:
+        top = ", ".join(f"{s.ticker}(+{s.quarters_behind}Q)" for s in stale[:8])
+        typer.echo(f"⚠ PIT freshness: {len(stale)} ticker(s) overdue: {top}"
+                   f"{' ...' if len(stale) > 8 else ''}")
+    else:
+        typer.echo("PIT freshness: all tickers current.")
+    typer.echo("Done. Historical data cached in DuckDB.")
+    cache.close()
+
+
 @app.command("fetch-history")
 def fetch_history(
     universe: Annotated[str, typer.Option(help="Universe to fetch (sp500, sp400)")] = "sp500",
@@ -455,12 +519,20 @@ def fetch_history(
     _setup_logging(verbose)
 
     from screener.data.fmp import CachedFMPProvider
+    from screener.data.sharadar import CachedSharadarProvider
 
     settings = Settings()
     provider, cache = _make_provider(settings)
 
+    if isinstance(provider, CachedSharadarProvider):
+        _fetch_history_sharadar(provider, cache, universe, years)
+        return
+
     if not isinstance(provider, CachedFMPProvider):
-        typer.echo("fetch-history requires FMP provider. Set FMP_API_KEY in .env")
+        typer.echo(
+            "fetch-history requires a real data provider. Set "
+            "NASDAQ_DATA_LINK_API_KEY or FMP_API_KEY in .env"
+        )
         raise typer.Exit(1)
 
     # Load PIT membership history for sp400

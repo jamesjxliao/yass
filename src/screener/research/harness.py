@@ -2,8 +2,8 @@
 
 Before this module, the ~8-line "load config → build pipeline → make provider →
 sync PIT server → pull padded price history" incantation was duplicated across
-every ``scripts/experiments/*.py`` harness (reaching into private ``cli`` helpers)
-and the ``lab``/``backtest``/``evaluate`` commands. A new experiment now reads:
+every experiment harness (reaching into private ``cli`` helpers) and the
+``lab``/``backtest``/``evaluate`` commands. A new experiment now reads:
 
     from screener.research.harness import build_research_context, run_variation
     ctx = build_research_context("config/example.yaml", start, end)
@@ -33,18 +33,43 @@ PRICE_LOOKBACK_DAYS = 400
 
 
 def make_provider(settings: Settings):
-    """Auto-select provider: CachedFMPProvider if an API key is set, else mock."""
+    """Select provider per settings.data_provider.
+
+    "auto" prefers Sharadar (when NASDAQ_DATA_LINK_API_KEY is set), then FMP,
+    then mock. DATA_PROVIDER=fmp forces FMP — the rollback path after the
+    jul-2026 Sharadar migration."""
     from screener.data.cache import CacheManager
 
     cache = CacheManager(settings.db_path)
-    if settings.fmp_api_key:
+    choice = settings.data_provider
+    if choice == "auto":
+        if settings.nasdaq_data_link_api_key:
+            choice = "sharadar"
+        elif settings.fmp_api_key:
+            choice = "fmp"
+        else:
+            choice = "mock"
+
+    if choice == "sharadar":
+        if not settings.nasdaq_data_link_api_key:
+            raise ValueError("DATA_PROVIDER=sharadar but NASDAQ_DATA_LINK_API_KEY unset")
+        from screener.data.sharadar import CachedSharadarProvider, SharadarProvider
+
+        provider = CachedSharadarProvider(
+            SharadarProvider(settings.nasdaq_data_link_api_key), cache
+        )
+    elif choice == "fmp":
+        if not settings.fmp_api_key:
+            raise ValueError("DATA_PROVIDER=fmp but FMP_API_KEY unset")
         from screener.data.fmp import CachedFMPProvider, FMPProvider
 
         provider = CachedFMPProvider(FMPProvider(settings.fmp_api_key), cache)
-    else:
+    elif choice == "mock":
         from screener.data.mock import MockProvider
 
         provider = MockProvider()
+    else:
+        raise ValueError(f"Unknown data_provider {choice!r} (auto|sharadar|fmp|mock)")
     # The CLI layer adds the user-facing "Using ... provider" echo; this stays
     # silent so experiments don't print and CLI commands don't double-announce.
     return provider, cache

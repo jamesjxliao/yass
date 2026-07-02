@@ -15,7 +15,10 @@ class Settings(BaseSettings):
     etoro_api_key: str = ""
     etoro_user_key: str = ""
     etoro_demo: bool = True
-    nasdaq_data_link_api_key: str = ""  # optional: Nasdaq Data Link (research data)
+    nasdaq_data_link_api_key: str = ""  # Nasdaq Data Link (Sharadar)
+    # Provider selection: "auto" prefers Sharadar when its key is present, then
+    # FMP, then mock. Set DATA_PROVIDER=fmp in .env to force FMP (rollback path).
+    data_provider: str = "auto"  # auto | sharadar | fmp | mock
     db_path: Path = Path("data/screener.duckdb")
     cache_ttl_hours: int = 24
     default_universe: str = "sp500"
