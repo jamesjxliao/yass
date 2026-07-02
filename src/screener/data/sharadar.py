@@ -436,7 +436,15 @@ class CachedSharadarProvider:
 
         if not cached_rows:
             return pl.DataFrame()
-        return pl.DataFrame(cached_rows, infer_schema_length=None)
+        df = pl.DataFrame(cached_rows, infer_schema_length=None)
+        # SF1 rows carry no sector; the TICKERS-derived sector_map does. FMP
+        # embeds sector inline in the profile row, so its fundamentals frame has
+        # a `sector` column — join here for parity, or downstream consumers that
+        # assume it (max_per_sector cap, the trade-log screen_results select)
+        # break on the Sharadar path. Left join: a ticker absent from sector_map
+        # keeps a null sector (column present), never drops the row.
+        sectors = self._cache.get_sectors(df["ticker"].to_list())
+        return df.join(sectors, on="ticker", how="left")
 
     def _build_fundamentals_rows(self, tickers: list[str]) -> dict[str, dict]:
         """Latest screening row per ticker from SF1 (+ price tail from SEP)."""

@@ -517,3 +517,49 @@ class TestInstrumentCacheCollision:
         assert broker.resolve_instrument_id("STX") == 8543
         # Reverse cache is still populated so the held position reports as STX.
         assert broker._ticker_for_instrument(999) == "STX"
+
+
+class TestAwaitPositionState:
+    """eToro's positions endpoint lags fills, so verification POLLS rather than
+    re-reading once — a real fill that shows up on a later poll must be confirmed,
+    not false-failed on the first miss (the bug that aborted a valid rebalance)."""
+
+    @staticmethod
+    def _pos(ticker):
+        return EtoroPosition(position_id=1, instrument_id=1, ticker=ticker,
+                             amount=1, units=1.0, open_rate=1.0, pnl=0)
+
+    def test_open_confirmed_on_a_later_poll(self):
+        broker = EtoroBroker(api_key="k", user_key="u", demo=True)
+        # Endpoint lags: empty on the first two reads, position appears on the 3rd.
+        broker.get_positions_detailed = MagicMock(
+            side_effect=[[], [], [self._pos("NEW")]])
+        pending = broker._await_position_state(
+            {"NEW"}, want_present=True, timeout=10, interval=0.001)
+        assert pending == set()  # confirmed present
+        assert broker.get_positions_detailed.call_count == 3
+
+    def test_close_confirmed_on_a_later_poll(self):
+        broker = EtoroBroker(api_key="k", user_key="u", demo=True)
+        broker.get_positions_detailed = MagicMock(
+            side_effect=[[self._pos("OLD")], [self._pos("OLD")], []])
+        pending = broker._await_position_state(
+            {"OLD"}, want_present=False, timeout=10, interval=0.001)
+        assert pending == set()  # confirmed gone
+
+    def test_times_out_when_fill_never_reflects(self):
+        broker = EtoroBroker(api_key="k", user_key="u", demo=True)
+        broker.get_positions_detailed = MagicMock(return_value=[])
+        pending = broker._await_position_state(
+            {"NEW"}, want_present=True, timeout=0.03, interval=0.01)
+        assert pending == {"NEW"}  # never appeared → surfaced as unconfirmed
+
+    def test_zero_interval_collapses_to_single_read(self):
+        # Tests patch _CLOSE_SETTLE_SECONDS to 0 → exactly one re-read, so the
+        # side_effect call counts other tests assert on stay correct.
+        broker = EtoroBroker(api_key="k", user_key="u", demo=True)
+        broker.get_positions_detailed = MagicMock(return_value=[])
+        pending = broker._await_position_state(
+            {"NEW"}, want_present=True, timeout=10, interval=0.0)
+        assert pending == {"NEW"}
+        assert broker.get_positions_detailed.call_count == 1

@@ -18,11 +18,19 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://public-api.etoro.com/api/v1"
 
-# Seconds to wait after a full-exit close before re-reading positions to verify
-# it cleared. eToro market closes settle near-instantly during market hours;
-# this brief settle avoids a false "did not clear" on a close that is merely
-# still pending. (Patched to 0 in tests.)
-_CLOSE_SETTLE_SECONDS = 2.0
+# Post-order verification re-reads positions to confirm a close/open actually
+# took effect. eToro's positions endpoint lags order execution — a fill can take
+# tens of seconds (observed ~30-90s) to appear/disappear there — so a single
+# quick re-read false-negatives on a perfectly good order. We instead POLL:
+# re-read every `_CLOSE_SETTLE_SECONDS` up to `_SETTLE_TIMEOUT_SECONDS`, returning
+# as soon as the expected state is observed. `_CLOSE_SETTLE_SECONDS` is the poll
+# interval (and the settle wait before the first read); patched to 0 in tests so
+# the poll collapses to a single deterministic re-read.
+_CLOSE_SETTLE_SECONDS = 3.0
+# Total window to wait for a fill to reflect in positions before declaring it
+# unconfirmed. Generous because a false negative on a sell aborts all Phase-2
+# buys; better to wait than to leave a swap half-done and re-trade it.
+_SETTLE_TIMEOUT_SECONDS = 90.0
 
 
 @dataclass
@@ -411,6 +419,38 @@ class EtoroBroker:
             logger.error("Failed to get rate for instrument %d: %s", instrument_id, e)
         return None
 
+    def _await_position_state(
+        self,
+        tickers: set[str],
+        *,
+        want_present: bool,
+        timeout: float = _SETTLE_TIMEOUT_SECONDS,
+        interval: float | None = None,
+    ) -> set[str]:
+        """Poll positions until every ticker reaches the wanted presence state.
+
+        `want_present=True` waits for each ticker to APPEAR (open confirmed);
+        `False` waits for it to DISAPPEAR (close confirmed). Returns the set of
+        tickers that never reached the wanted state within `timeout` — empty
+        means all confirmed.
+
+        eToro's positions endpoint lags fills, so a fill is real but not yet
+        visible; polling re-reads until it shows up rather than failing on the
+        first miss. When `interval <= 0` (tests patch `_CLOSE_SETTLE_SECONDS` to
+        0) this collapses to a single deterministic re-read, preserving the exact
+        call count existing tests assert on.
+        """
+        if interval is None:
+            interval = _CLOSE_SETTLE_SECONDS
+        pending = set(tickers)
+        deadline = time.monotonic() + timeout
+        while True:
+            time.sleep(interval)  # settle before (re-)reading
+            held = {p.ticker for p in self.get_positions_detailed()}
+            pending = {t for t in pending if (t not in held) == want_present}
+            if not pending or interval <= 0 or time.monotonic() >= deadline:
+                return pending
+
     def execute_orders(
         self,
         orders: list[RebalanceOrder],
@@ -469,22 +509,25 @@ class EtoroBroker:
                 logger.error("SELL %s $%.2f — FAILED: %s", order.ticker, order.notional, e)
 
         # Verify full exits actually cleared. eToro's close endpoint returns HTTP
-        # 200 even when the close is silently rejected (PDT rules: account < $25k
-        # or > 3 day-trades / 5 days), so a no-op close is otherwise marked
-        # "submitted" and the abort guard below never fires — leaving the name
-        # still held while Phase-2 buys spend cash that was never freed. Re-read
-        # positions and demote any still-held full exit to an error so it routes
-        # through the same abort path as a raised close (mirrors AlpacaBroker).
+        # 200 even when the close does not go through, so a no-op close is
+        # otherwise marked "submitted" and the abort guard below never fires —
+        # leaving the name still held while Phase-2 buys spend cash that was never
+        # freed. Poll positions (the endpoint lags the fill by tens of seconds)
+        # and demote any full exit still held after the settle window to an error,
+        # routing it through the same abort path as a raised close (mirrors
+        # AlpacaBroker).
         full_exits = [o for o in sells if not o.trim and not o.status.startswith("error")]
         if full_exits:
-            time.sleep(_CLOSE_SETTLE_SECONDS)  # let market closes settle before re-read
-            still_held = {p.ticker for p in self.get_positions_detailed()}
+            still_held = self._await_position_state(
+                {o.ticker for o in full_exits}, want_present=False,
+            )
             for order in full_exits:
                 if order.ticker in still_held:
                     order.status = "error: close did not clear (still held)"
                     logger.error(
-                        "SELL %s (full exit) — did not clear after close; "
-                        "still held on re-query (PDT silent reject?)", order.ticker,
+                        "SELL %s (full exit) — still held %.0fs after close; "
+                        "treating as unconfirmed (settle lag or a genuine reject)",
+                        order.ticker, _SETTLE_TIMEOUT_SECONDS,
                     )
 
         failed_sells = [o for o in sells if o.status.startswith("error")]
@@ -530,9 +573,9 @@ class EtoroBroker:
                 weighting_label(target_weights),
             )
             submitted_buys = 0
-            # eToro closes are async (and silently no-op under PDT); the freed
-            # cash may not have settled. Clamp buys to available cash so a fully-
-            # invested swap can't over-submit beyond what's actually spendable.
+            # eToro closes are async and the freed cash may not have settled yet.
+            # Clamp buys to available cash so a fully-invested swap can't
+            # over-submit beyond what's actually spendable.
             cash_remaining = account.get("cash", 0.0)
             for order in buys:
                 current_value = current.get(order.ticker, 0)
@@ -576,23 +619,26 @@ class EtoroBroker:
                     logger.error("BUY %s $%.2f — FAILED: %s", order.ticker, order.notional, e)
 
             # Verify opens cleared, mirroring the full-exit verification above.
-            # _open_position returns HTTP 200 even on a silent reject, which both
-            # under-invests the book AND (since cash_remaining was already
-            # decremented) shrinks every later buy in this loop. Re-read positions
-            # and surface any submitted buy that produced no holding so a partial
-            # rebalance isn't silently logged as fully "submitted". (A buy that
-            # adds to an already-held name can't be confirmed by presence alone —
-            # this catches the common swap-in-of-a-new-name case.)
+            # _open_position returns HTTP 200 even when the open does not go
+            # through, which both under-invests the book AND (since cash_remaining
+            # was already decremented) shrinks every later buy in this loop. Poll
+            # positions (the endpoint lags the fill) and surface any submitted buy
+            # that produced no holding so a partial rebalance isn't silently logged
+            # as fully "submitted". (A buy that adds to an already-held name can't
+            # be confirmed by presence alone — this catches the common
+            # swap-in-of-a-new-name case.)
             submitted = [o for o in buys if o.status == "submitted"]
             if submitted:
-                time.sleep(_CLOSE_SETTLE_SECONDS)
-                held_now = {p.ticker for p in self.get_positions_detailed()}
+                not_held = self._await_position_state(
+                    {o.ticker for o in submitted}, want_present=True,
+                )
                 for order in submitted:
-                    if order.ticker not in held_now:
+                    if order.ticker in not_held:
                         order.status = "error: open did not clear (not held)"
                         logger.error(
-                            "BUY %s — did not clear after open; not held on "
-                            "re-query (PDT silent reject?)", order.ticker,
+                            "BUY %s — not held %.0fs after open; treating as "
+                            "unconfirmed (settle lag or a genuine reject)",
+                            order.ticker, _SETTLE_TIMEOUT_SECONDS,
                         )
 
         return orders
