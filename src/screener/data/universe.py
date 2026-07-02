@@ -116,16 +116,27 @@ class UniverseManager:
                         pl.lit(None).cast(pl.Date).alias(col)
                     )
 
-        self._cache._conn.execute(
-            "DELETE FROM universe_membership WHERE index_name = ?", [index]
-        )
-        self._cache._conn.register("_membership_bulk", df.to_arrow())
-        self._cache._conn.execute(
-            """INSERT INTO universe_membership
-               (ticker, index_name, added_date, removed_date, is_delisted)
-               SELECT ticker, index_name, added_date, removed_date, is_delisted
-               FROM _membership_bulk"""
-        )
-        self._cache._conn.unregister("_membership_bulk")
+        conn = self._cache._conn
+        conn.register("_membership_bulk", df.to_arrow())
+        try:
+            # Atomic replace: a crash between DELETE and INSERT would leave an
+            # empty membership table, and pit_server would silently fall back
+            # to current-members-only (survivorship inflation).
+            conn.execute("BEGIN TRANSACTION")
+            conn.execute(
+                "DELETE FROM universe_membership WHERE index_name = ?", [index]
+            )
+            conn.execute(
+                """INSERT INTO universe_membership
+                   (ticker, index_name, added_date, removed_date, is_delisted)
+                   SELECT ticker, index_name, added_date, removed_date, is_delisted
+                   FROM _membership_bulk"""
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.unregister("_membership_bulk")
         logger.info("Bulk-loaded %d membership records for '%s'", len(records), index)
         return len(records)

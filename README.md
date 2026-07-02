@@ -15,7 +15,7 @@ Screen stocks using fundamental signals, backtest with point-in-time data, and e
 ```mermaid
 flowchart LR
     subgraph DATA["1. Get Data"]
-        FMP[FMP API] --> CACHE[(DuckDB Cache)]
+        API["Data API (Sharadar / FMP)"] --> CACHE[(DuckDB Cache)]
         CACHE --> PIT[PIT Server]
     end
 
@@ -33,7 +33,6 @@ flowchart LR
 
     subgraph USE["4. Use"]
         CLI[CLI]
-        UI[Dashboard]
     end
 
     PIT -->|prices + fundamentals| SCREEN
@@ -50,7 +49,7 @@ cd yass
 poetry install
 
 # Set up your data provider and config
-cp .env.example .env  # add your FMP API key (or skip — falls back to mock data)
+cp .env.example .env  # add your data API key (or skip — falls back to mock data)
 cp config/example.yaml config/default.yaml  # customize weights here
 
 # Run the screener
@@ -61,14 +60,11 @@ poetry run screener backtest
 
 # Full evaluation (Monte Carlo, factor attribution, regime analysis)
 poetry run screener evaluate
-
-# Launch the dashboard (requires data — run fetch-history first, or explore with mock data)
-poetry run streamlit run app.py
 ```
 
-No FMP key? No problem — the screener falls back to mock data so you can explore immediately.
+No API key? No problem — the screener falls back to mock data so you can explore immediately.
 
-> **Data provider:** YASS uses [Financial Modeling Prep (FMP)](https://financialmodelingprep.com/) for market data. Without an API key, mock data is used.
+> **Data provider:** YASS supports [Sharadar (Nasdaq Data Link)](https://data.nasdaq.com/) and [Financial Modeling Prep (FMP)](https://financialmodelingprep.com/) for market data. Set `NASDAQ_DATA_LINK_API_KEY` or `FMP_API_KEY` in `.env` — auto-selection prefers Sharadar; `DATA_PROVIDER=sharadar|fmp|mock` forces a choice. Without a key, mock data is used. Don't point both providers at the same DuckDB file — their caches must not mix.
 
 ## Included Signals
 
@@ -127,7 +123,6 @@ Change the signals, adjust the weights, run `poetry run screener backtest` to se
 - **Hold bonus** — Z-score boost for current holdings to reduce turnover and improve after-tax returns.
 - **Broker integration** — Rebalance via Alpaca or eToro with dry-run safety and trade logging.
 - **Mock data provider** — Explore the full framework without an API key.
-- **Streamlit dashboard** — Interactive UI with backtest explorer, signal deep-dive, and current screen tabs.
 
 ## Available Data Fields
 
@@ -177,8 +172,7 @@ Add it to your config and backtest. No core code changes needed.
 │   ├── evaluation/       # Monte Carlo, factor attribution, charts
 │   ├── trading/          # Broker integrations (Alpaca, eToro, Robinhood)
 │   └── plugins/          # Plugin discovery and registry
-├── tests/                # Test suite
-└── app.py                # Streamlit dashboard
+└── tests/                # Test suite
 ```
 
 ## Commands
@@ -187,11 +181,10 @@ Add it to your config and backtest. No core code changes needed.
 poetry run screener list-plugins          # Show discovered filters & signals
 poetry run screener screen --top-n 10     # Run screener
 poetry run screener backtest              # Run backtest
-poetry run screener fetch-history         # Fetch historical data from FMP
+poetry run screener fetch-history         # Fetch historical data into DuckDB
 poetry run screener evaluate              # Full signal evaluation
 poetry run screener trade                 # Rebalance via Alpaca (dry run)
 poetry run screener etoro-trade           # Rebalance via eToro (dry run)
-poetry run streamlit run app.py           # Launch dashboard
 ```
 
 ## Development

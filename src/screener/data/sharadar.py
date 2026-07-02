@@ -40,7 +40,9 @@ logging.getLogger("httpx").setLevel(logging.WARNING)  # api_key is a query param
 
 BASE_URL = "https://data.nasdaq.com/api/v3/datatables"
 
-# Benchmark/hedge ETFs live in SFP, not SEP
+# Benchmark/hedge ETFs live in SFP, not SEP. Routing is by this static set: a
+# fund ticker missing here would query SEP and silently return no rows — extend
+# the set when adding a new benchmark/hedge instrument.
 _FUND_TICKERS = {"SPY", "QQQ", "DIA", "IWM", "TLT", "HYG", "LQD", "GLD"}
 
 # Secondary share classes whose primary class carries the fundamentals (SF1
@@ -120,16 +122,7 @@ class SharadarProvider:
             p = {"api_key": self._api_key, "qopts.per_page": 10000, **params}
             if cursor:
                 p["qopts.cursor_id"] = cursor
-            for attempt in range(5):
-                resp = self._client.get(f"{BASE_URL}/{table}", params=p)
-                if resp.status_code == 429:
-                    time.sleep(2 ** attempt)
-                    continue
-                resp.raise_for_status()
-                break
-            else:
-                raise RuntimeError(f"{table}: persistent 429s")
-            body = resp.json()
+            body = self._get_json(table, p)
             d = body["datatable"]
             if columns is None:
                 columns = [c["name"] for c in d["columns"]]
@@ -137,6 +130,27 @@ class SharadarProvider:
             cursor = body.get("meta", {}).get("next_cursor_id")
             if not cursor:
                 return rows, columns
+
+    def _get_json(self, table: str, params: dict) -> dict:
+        """GET with backoff on 429/5xx/transport errors — a transient blip must
+        not abort a long fetch-history run. Raised errors carry only the table
+        and status, never the URL: its query string embeds the api_key."""
+        last = ""
+        for attempt in range(5):
+            try:
+                resp = self._client.get(f"{BASE_URL}/{table}", params=params)
+            except httpx.HTTPError as exc:
+                last = type(exc).__name__
+                time.sleep(2 ** attempt)
+                continue
+            if resp.status_code == 429 or resp.status_code >= 500:
+                last = f"HTTP {resp.status_code}"
+                time.sleep(2 ** attempt)
+                continue
+            if resp.status_code >= 400:  # auth/config — not transient
+                raise RuntimeError(f"{table}: HTTP {resp.status_code}")
+            return resp.json()
+        raise RuntimeError(f"{table}: persistent errors ({last})")
 
     def _frame(self, table: str, params: dict) -> pl.DataFrame:
         rows, cols = self._fetch_all(table, params)
@@ -232,61 +246,89 @@ def _batched(items: list, n: int):
         yield items[i:i + n]
 
 
+def _year_ago(cd: str) -> str:
+    """Same calendar quarter one year earlier (calendardates are quarter-ends)."""
+    return f"{int(cd[:4]) - 1}{cd[4:]}"
+
+
+def _asof_filing(idx: dict[str, list[dict]], cd: str | None, datekey: str) -> dict | None:
+    """Latest filing for period ``cd`` that was public on ``datekey``.
+
+    ``idx`` maps calendardate -> that period's filings sorted by datekey
+    (amendments after originals). Returns None when the period is absent or
+    was filed only after ``datekey`` — a missing period must yield *no*
+    comparison, not a positionally shifted one."""
+    best = None
+    for row in idx.get(cd, ()):
+        if row["datekey"] is not None and row["datekey"] <= datekey:
+            best = row
+    return best
+
+
+def _period_index(rows: list[dict]) -> tuple[dict[str, list[dict]], dict[str, str | None]]:
+    """(calendardate -> filings, calendardate -> preceding calendardate)."""
+    idx: dict[str, list[dict]] = {}
+    for r in rows:
+        idx.setdefault(r["calendardate"], []).append(r)
+    cds = sorted(idx)
+    prev_cd = {cd: (cds[i - 1] if i else None) for i, cd in enumerate(cds)}
+    return idx, prev_cd
+
+
 def _snapshots_from_history(arq: pl.DataFrame, ary: pl.DataFrame) -> list[tuple]:
     """PIT tuples (ticker, field, value, report_date, source, observed_at) from
     SF1 history frames. Windowed fields (priors, YoY growth) are stamped with the
-    CURRENT row's datekey — the date the comparison became computable."""
+    CURRENT row's datekey — the date the comparison became computable — and the
+    comparison period is matched by CALENDARDATE (as-of the current datekey), not
+    by list position: SF1 delivers amended filings as extra rows per period and
+    occasionally skips one, either of which would silently shift positional
+    windows onto the wrong quarter."""
     snaps: list[tuple] = []
     if not arq.is_empty():
-        arq = arq.sort(["ticker", "calendardate"])
+        arq = arq.sort(["ticker", "calendardate", "datekey"])
         by_ticker: dict[str, list[dict]] = {}
         for r in arq.iter_rows(named=True):
             by_ticker.setdefault(r["ticker"], []).append(r)
         for t, rows in by_ticker.items():
-            for i, r in enumerate(rows):
+            idx, prev_cd = _period_index(rows)
+            for r in rows:
                 fields = compute_arq_fields(r)
-                prev = rows[i - 1] if i >= 1 else None
-                yr = rows[i - 4] if i >= 4 else None
+                cd, dk = r["calendardate"], r["datekey"]
+                prev = _asof_filing(idx, prev_cd[cd], dk)
                 if prev is not None:
                     fields["sga_to_revenue_prior"] = _ratio(prev["sgna"], prev["revenue"])
+                    pyr = _asof_filing(idx, _year_ago(prev["calendardate"]), dk)
+                    if pyr is not None:
+                        fields["rev_growth_prior"] = _growth(prev["revenue"], pyr["revenue"])
+                        fields["eps_growth_prior"] = _growth(prev["eps"], pyr["eps"])
+                yr = _asof_filing(idx, _year_ago(cd), dk)
                 if yr is not None:
                     fields["rev_growth_current"] = _growth(r["revenue"], yr["revenue"])
                     fields["eps_growth_current"] = _growth(r["eps"], yr["eps"])
-                if i >= 5:
-                    p, pyr = rows[i - 1], rows[i - 5]
-                    fields["rev_growth_prior"] = _growth(p["revenue"], pyr["revenue"])
-                    fields["eps_growth_prior"] = _growth(p["eps"], pyr["eps"])
                 for field, value in fields.items():
                     if value is not None:
-                        snaps.append((t, field, float(value), r["calendardate"],
-                                      "sharadar_arq", r["datekey"]))
+                        snaps.append((t, field, float(value), cd, "sharadar_arq", dk))
     if not ary.is_empty():
-        ary = ary.sort(["ticker", "calendardate"])
-        adf = ary.with_columns(
-            _ratio_expr("opinc", "revenue").alias("op_margin"),
-        ).with_columns([
-            pl.col("grossmargin").shift(1).over("ticker").alias("gm_prior"),
-            pl.col("op_margin").shift(1).over("ticker").alias("om_prior"),
-        ])
-        for r in adf.iter_rows(named=True):
-            for field, value in (
-                ("gross_margin_current", r["grossmargin"]),
-                ("gross_margin_prior", r["gm_prior"]),
-                ("op_margin_current", r["op_margin"]),
-                ("op_margin_prior", r["om_prior"]),
-            ):
-                if value is not None:
-                    snaps.append((r["ticker"], field, float(value),
-                                  r["calendardate"], "sharadar_ary", r["datekey"]))
+        ary = ary.sort(["ticker", "calendardate", "datekey"])
+        ary_by_ticker: dict[str, list[dict]] = {}
+        for r in ary.iter_rows(named=True):
+            ary_by_ticker.setdefault(r["ticker"], []).append(r)
+        for t, rows in ary_by_ticker.items():
+            idx, prev_cd = _period_index(rows)
+            for r in rows:
+                cd, dk = r["calendardate"], r["datekey"]
+                prev = _asof_filing(idx, prev_cd[cd], dk)
+                fields = {
+                    "gross_margin_current": r["grossmargin"],
+                    "op_margin_current": _ratio(r["opinc"], r["revenue"]),
+                }
+                if prev is not None:
+                    fields["gross_margin_prior"] = prev["grossmargin"]
+                    fields["op_margin_prior"] = _ratio(prev["opinc"], prev["revenue"])
+                for field, value in fields.items():
+                    if value is not None:
+                        snaps.append((t, field, float(value), cd, "sharadar_ary", dk))
     return snaps
-
-
-def _ratio_expr(n: str, d: str) -> pl.Expr:
-    return (
-        pl.when(pl.col(d).is_not_null() & (pl.col(d) != 0) & pl.col(n).is_not_null())
-        .then(pl.col(n) / pl.col(d))
-        .otherwise(None)
-    )
 
 
 class CachedSharadarProvider:
@@ -355,9 +397,7 @@ class CachedSharadarProvider:
             for t, ss in stints.items() for s, e in ss
             if t not in _SHARE_CLASS_DUPES  # one class per company
         ]
-        self._cache._conn.execute(
-            "DELETE FROM universe_membership WHERE index_name = 'sp500'"
-        )
+        # bulk_load_history replaces the index's records atomically
         return UniverseManager(self._cache).bulk_load_history("sp500", records)
 
     # --- fundamentals (live screen) -----------------------------------------
@@ -372,7 +412,7 @@ class CachedSharadarProvider:
             hit = self._cache.get_or_fetch_if_cached(
                 "sharadar", self._fundamentals_cache_key(t)
             )
-            if hit:
+            if hit is not None:  # [] = cached "no data": don't refetch for 7 days
                 cached_rows.extend(hit)
             else:
                 uncached.append(t)
@@ -407,9 +447,15 @@ class CachedSharadarProvider:
 
         rows: dict[str, dict] = {}
         if not arq.is_empty():
-            arq = arq.sort(["ticker", "calendardate"])
+            # One row per quarter: the latest filing wins (amendments supersede
+            # originals). Comparisons match by calendardate, not list position —
+            # same rationale as _snapshots_from_history.
+            arq = (arq.sort(["ticker", "calendardate", "datekey"])
+                   .unique(subset=["ticker", "calendardate"], keep="last")
+                   .sort(["ticker", "calendardate"]))
             for t, grp in arq.group_by("ticker", maintain_order=True):
                 hist = grp.to_dicts()
+                by_cd = {h["calendardate"]: h for h in hist}
                 r = hist[-1]
                 row: dict = {"ticker": t[0] if isinstance(t, tuple) else t}
                 row.update({k: v for k, v in compute_arq_fields(r).items()
@@ -419,15 +465,19 @@ class CachedSharadarProvider:
                     v = _ratio(p["sgna"], p["revenue"])
                     if v is not None:
                         row["sga_to_revenue_prior"] = v
-                if len(hist) >= 5:
-                    row["rev_growth_current"] = _growth(r["revenue"], hist[-5]["revenue"])
-                    row["eps_growth_current"] = _growth(r["eps"], hist[-5]["eps"])
-                if len(hist) >= 6:
-                    row["rev_growth_prior"] = _growth(hist[-2]["revenue"], hist[-6]["revenue"])
-                    row["eps_growth_prior"] = _growth(hist[-2]["eps"], hist[-6]["eps"])
+                    pyr = by_cd.get(_year_ago(p["calendardate"]))
+                    if pyr is not None:
+                        row["rev_growth_prior"] = _growth(p["revenue"], pyr["revenue"])
+                        row["eps_growth_prior"] = _growth(p["eps"], pyr["eps"])
+                yr = by_cd.get(_year_ago(r["calendardate"]))
+                if yr is not None:
+                    row["rev_growth_current"] = _growth(r["revenue"], yr["revenue"])
+                    row["eps_growth_current"] = _growth(r["eps"], yr["eps"])
                 rows[row["ticker"]] = row
         if not ary.is_empty():
-            ary = ary.sort(["ticker", "calendardate"])
+            ary = (ary.sort(["ticker", "calendardate", "datekey"])
+                   .unique(subset=["ticker", "calendardate"], keep="last")
+                   .sort(["ticker", "calendardate"]))
             for t, grp in ary.group_by("ticker", maintain_order=True):
                 hist = grp.to_dicts()
                 ticker = t[0] if isinstance(t, tuple) else t

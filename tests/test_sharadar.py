@@ -4,7 +4,9 @@ from __future__ import annotations
 from datetime import date, timedelta
 from unittest.mock import MagicMock
 
+import httpx
 import polars as pl
+import pytest
 from screener.data.cache import CacheManager
 from screener.data.sharadar import (
     CachedSharadarProvider,
@@ -97,6 +99,97 @@ def test_snapshots_annual_margins():
     assert abs(by[("op_margin_current", "2024-12-31")][2] - 40 / 110) < 1e-9
     # first FY has no prior
     assert ("gross_margin_prior", "2023-12-31") not in by
+
+
+def test_snapshots_amendment_pit_asof():
+    """Amended filings must not shift windows, and lookbacks are PIT as-of."""
+    rows = []
+    for i, q in enumerate(["2023-03-31", "2023-06-30", "2023-09-30", "2023-12-31",
+                           "2024-03-31"]):
+        rows.append(_arq_row(calendardate=q, datekey=f"{q[:4]}-{int(q[5:7]):02d}-28",
+                             revenue=200.0 + i * 10, sgna=30.0 + i))
+    # amendment for 2023-03-31, filed 2023-09-15, restates revenue 200 -> 180
+    rows.append(_arq_row(calendardate="2023-03-31", datekey="2023-09-15",
+                         revenue=180.0, sgna=99.0))
+    snaps = _snapshots_from_history(pl.DataFrame(rows, infer_schema_length=None),
+                                    pl.DataFrame())
+
+    # both filings of the amended quarter are stored, each PIT-stamped
+    roe_obs = {s[5] for s in snaps if s[1] == "roe" and s[3] == "2023-03-31"}
+    assert roe_obs == {"2023-03-28", "2023-09-15"}
+
+    by = {(s[1], s[3], s[5]): s[2] for s in snaps}
+    # 2024-03-31 YoY matches 2023-03-31 by calendardate; the amendment is the
+    # latest filing available on 2024-03-28 -> uses restated revenue 180
+    assert abs(by[("rev_growth_current", "2024-03-31", "2024-03-28")]
+               - (240.0 / 180.0 - 1)) < 1e-9
+    # 2023-06-30's prior-quarter sga uses the ORIGINAL filing — the amendment
+    # wasn't public yet on 2023-06-28
+    assert abs(by[("sga_to_revenue_prior", "2023-06-30", "2023-06-28")]
+               - 30.0 / 200.0) < 1e-9
+    # the extra amendment row must not positionally shift other windows:
+    # 2023-12-31 has no 2022-12-31 quarter -> still no YoY for it
+    assert ("rev_growth_current", "2023-12-31", "2023-12-28") not in by
+
+
+def test_snapshots_skipped_quarter_yields_no_yoy():
+    """A missing quarter yields no YoY comparison instead of a shifted one."""
+    quarters = ["2023-03-31", "2023-06-30", "2023-12-31",   # 2023-09-30 missing
+                "2024-03-31", "2024-06-30", "2024-09-30"]
+    rows = [_arq_row(calendardate=q, datekey=f"{q[:4]}-{int(q[5:7]):02d}-28",
+                     revenue=100.0 + i * 10)
+            for i, q in enumerate(quarters)]
+    snaps = _snapshots_from_history(pl.DataFrame(rows, infer_schema_length=None),
+                                    pl.DataFrame())
+    by = {(s[1], s[3]): s[2] for s in snaps}
+    # year-ago of 2024-09-30 is the missing quarter -> no growth, not a wrong one
+    assert ("rev_growth_current", "2024-09-30") not in by
+    # quarters whose year-ago exists still compute across the gap
+    assert abs(by[("rev_growth_current", "2024-03-31")] - (130.0 / 100.0 - 1)) < 1e-9
+    assert abs(by[("rev_growth_current", "2024-06-30")] - (140.0 / 110.0 - 1)) < 1e-9
+
+
+def test_build_fundamentals_amendment_wins():
+    """Live screen serves the latest filing per quarter, deterministically."""
+    cache = CacheManager(":memory:")
+    api = SharadarProvider(api_key="k")
+    hist = [_arq_row(calendardate="2024-03-31", datekey="2024-04-28", netinc=30.0),
+            _arq_row(calendardate="2024-06-30", datekey="2024-07-28", netinc=40.0),
+            # amendment restates the latest quarter
+            _arq_row(calendardate="2024-06-30", datekey="2024-09-01", netinc=10.0)]
+    api.get_arq_history = MagicMock(
+        return_value=pl.DataFrame(hist, infer_schema_length=None))
+    api.get_ary_history = MagicMock(return_value=pl.DataFrame())
+    api.get_prices = MagicMock(return_value=pl.DataFrame())
+    prov = CachedSharadarProvider(api, cache)
+    rows = prov._build_fundamentals_rows(["TST"])
+    assert abs(rows["TST"]["roe"] - 10.0 / 300.0) < 1e-9  # amendment, not original
+    cache.close()
+
+
+def test_fetch_retries_transient_errors(monkeypatch):
+    monkeypatch.setattr("screener.data.sharadar.time.sleep", lambda s: None)
+    p = SharadarProvider(api_key="sekret")
+    ok = MagicMock(status_code=200)
+    ok.json.return_value = {"datatable": {"columns": [{"name": "ticker"}],
+                                          "data": [["AAA"]]}, "meta": {}}
+    p._client = MagicMock()
+    p._client.get.side_effect = [MagicMock(status_code=500),
+                                 httpx.ConnectError("boom"), ok]
+    rows, cols = p._fetch_all("SHARADAR/SF1", {})
+    assert rows == [["AAA"]] and cols == ["ticker"]
+    assert p._client.get.call_count == 3
+
+
+def test_fetch_4xx_fails_fast_and_redacts_key(monkeypatch):
+    monkeypatch.setattr("screener.data.sharadar.time.sleep", lambda s: None)
+    p = SharadarProvider(api_key="sekret")
+    p._client = MagicMock()
+    p._client.get.return_value = MagicMock(status_code=403)
+    with pytest.raises(RuntimeError, match="403") as excinfo:
+        p._fetch_all("SHARADAR/SF1", {})
+    assert "sekret" not in str(excinfo.value)
+    assert p._client.get.call_count == 1  # 4xx is not retried
 
 
 def test_universe_dedupes_share_classes():

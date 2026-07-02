@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -28,6 +29,16 @@ class Settings(BaseSettings):
     # Settings; an unknown entry must not brick every CLI command (pydantic's
     # default extra="forbid" on env-file entries did exactly that).
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
+
+    @field_validator("data_provider")
+    @classmethod
+    def _check_data_provider(cls, v: str) -> str:
+        # Fail at Settings() load, same fail-fast treatment as the pipeline
+        # config keys — a DATA_PROVIDER typo must not resolve to a fallback.
+        v = v.strip().lower()
+        if v not in {"auto", "sharadar", "fmp", "mock"}:
+            raise ValueError(f"data_provider must be auto|sharadar|fmp|mock, got {v!r}")
+        return v
 
     @property
     def filters_dir(self) -> Path:

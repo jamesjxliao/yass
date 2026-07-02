@@ -53,3 +53,14 @@ def test_backtest_kwargs_bundle_maps_frequency():
         "hold_bonus": 1.0,
         "weighting": "equal",
     }
+
+
+def test_settings_data_provider_validated():
+    """DATA_PROVIDER typos fail at Settings() load; case is normalized."""
+    from pydantic import ValidationError
+    from screener.config import Settings
+
+    assert Settings(data_provider="FMP").data_provider == "fmp"
+    assert Settings(data_provider=" auto ").data_provider == "auto"
+    with pytest.raises(ValidationError):
+        Settings(data_provider="frnp")

@@ -70,8 +70,11 @@ def make_provider(settings: Settings):
         provider = MockProvider()
     else:
         raise ValueError(f"Unknown data_provider {choice!r} (auto|sharadar|fmp|mock)")
-    # The CLI layer adds the user-facing "Using ... provider" echo; this stays
-    # silent so experiments don't print and CLI commands don't double-announce.
+    # The CLI layer adds the user-facing "Using ... provider" echo; this logs
+    # instead of printing so CLI commands don't double-announce — but it is
+    # never fully silent, so a broken .env can't run an experiment on mock
+    # without leaving a trace.
+    logger.info("Data provider: %s (db: %s)", choice, settings.db_path)
     return provider, cache
 
 

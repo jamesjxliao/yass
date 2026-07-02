@@ -40,4 +40,6 @@ data/*.duckdb.bak*
 # Lazy Prices experiment (checkpoints regenerable via fetch_lazy_prices.py)
 data/lazy_prices/*
 !data/lazy_prices/cik_overrides.json
-data/insider_sf2/checkpoints/
+# SF2 insider data: licensed Sharadar raw rows — local-only, never committed
+# (regenerable via fetch_insider_sf2.py)
+data/insider_sf2/
