@@ -85,20 +85,6 @@ def benchmark_period_returns(
     ]
 
 
-def _compute_turnover(prev_picks: set[str], new_picks: set[str]) -> float:
-    """Fraction of positions that changed between rebalances.
-
-    Returns 1.0 if all positions changed, 0.0 if none changed.
-    """
-    if not prev_picks and not new_picks:
-        return 0.0
-    if not prev_picks:
-        return 1.0  # First period: all new
-    all_positions = prev_picks | new_picks
-    changed = len(prev_picks.symmetric_difference(new_picks))
-    return changed / len(all_positions) if all_positions else 0.0
-
-
 def run_backtest(
     pipeline: ScreeningPipeline,
     pit_server: PITDataServer,
@@ -192,13 +178,21 @@ def run_backtest(
         # Target weights for this period (None ⇒ equal, handled as simple mean).
         new_weights = compute_weights(picks, weighting) if weighting != "equal" else None
 
-        # Compute turnover-based transaction cost
-        turnover = _compute_turnover(prev_picks, pick_tickers)
+        # Transaction cost = fraction of the book traded × cost rate. The
+        # symmetric difference already counts BOTH legs of a swap (each exiting
+        # name sold + each entering name bought), so symdiff/N is the full
+        # round-trip traded fraction — do NOT also multiply by 2. This is the L1
+        # weight change of the membership swap, matching the held-name drift-cost
+        # convention below (the old `symdiff/union × 2` over-charged swaps ~1.8×
+        # and was inconsistent with that drift cost). First period deploys from
+        # cash (buy all N, one-way = 1.0).
         if prev_picks:
-            total_swaps += len(prev_picks.symmetric_difference(pick_tickers)) // 2
-        # First period: buy only (no sell), so charge 1x; subsequent: buy+sell = 2x
-        cost_multiplier = 1 if not prev_picks else 2
-        cost = turnover * (transaction_cost_bps / 10_000) * cost_multiplier
+            symdiff = len(prev_picks.symmetric_difference(pick_tickers))
+            total_swaps += symdiff // 2
+            traded_fraction = symdiff / len(pick_tickers) if pick_tickers else 0.0
+        else:
+            traded_fraction = 1.0
+        cost = traded_fraction * (transaction_cost_bps / 10_000)
 
         # Weighted strategies also re-size names HELD across the rebalance as
         # their vols drift; the membership turnover above only charges names that
