@@ -41,12 +41,18 @@ class RobinhoodBroker:
 
         The MCP `get_portfolio` payload (the inner `data` object — this also
         unwraps a `{"data": {...}}` envelope if passed whole) carries:
-          - total_value:  positions + cash (what we rebalance against)
+          - total_value:  positions + ALL cash (settled + unsettled)
           - equity_value: market value of equity positions only
-          - cash:         settled cash
-          - buying_power: nested dict, real spendable figure
-        `equity` is set to **total_value** so newly-added cash deploys into the
-        target weights — using equity_value alone would strand the cash.
+          - cash:         total cash balance (settled + unsettled)
+          - buying_power: nested dict, the real spendable (settled) figure
+        `equity` (the sizing base) is the **deployable** capital = position value
+        + settled buying power = ``total_value − unsettled_cash``. Unsettled cash
+        (``cash − buying_power`` — e.g. sale proceeds still settling in a cash
+        account) is excluded so the equal-weight target isn't inflated by money
+        that can't be traded yet: sizing to full total_value over-buys the names
+        filled first while the rest wait on settlement. Settled added cash still
+        deploys. A caller's explicit hold-back is applied separately via the
+        ``reserve`` arg of ``compute_rebalance_orders``.
         """
         d = portfolio_data.get("data", portfolio_data)
 
@@ -59,11 +65,21 @@ class RobinhoodBroker:
             bp = bp.get("buying_power", 0)
         buying_power = float(bp or 0)
 
+        # Unsettled = cash the broker won't let us trade yet (sale proceeds in a
+        # cash account). Clamp at 0 so a margin account's buying_power > cash
+        # can't inflate the base — we never size into margin. Subtract from
+        # total_value (not equity_value + buying_power: identical value, but this
+        # form stays bit-exact = total_value when fully settled).
+        unsettled_cash = max(cash - buying_power, 0.0)
+        deployable = total_value - unsettled_cash
+
         return {
-            "equity": total_value,
+            "equity": deployable,
             "cash": cash,
             "buying_power": buying_power,
             "portfolio_value": equity_value,
+            "total_value": total_value,
+            "unsettled_cash": unsettled_cash,
         }
 
     @staticmethod
@@ -128,9 +144,18 @@ class RobinhoodBroker:
         account: dict,
         current: dict[str, float],
         target_weights: dict[str, float] | None = None,
+        reserve: float = 0.0,
     ) -> list[RebalanceOrder]:
+        """``reserve`` is capital to explicitly hold back from deployment (the
+        "don't deploy this" amount) — subtracted from the deployable sizing base
+        (``account["equity"]``, which already excludes unsettled cash) before
+        per-name targets are computed. Clamped so the base never goes negative;
+        a reserve larger than settled cash therefore shrinks the target book and
+        trims positions down to it, which is a valid "reduce my exposure" input.
+        """
+        base = max(account["equity"] - max(reserve, 0.0), 0.0)
         return compute_rebalance_orders(
-            target_tickers, account["equity"], current, target_weights,
+            target_tickers, base, current, target_weights,
         )
 
     def format_mcp_order(

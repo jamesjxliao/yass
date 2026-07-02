@@ -15,11 +15,12 @@ class TestParsePortfolio:
         }
         result = RobinhoodBroker.parse_portfolio(data)
 
-        # equity is total_value so newly-added cash deploys into target weights
+        # Fully settled (buying_power == cash) → deployable base == total_value.
         assert result["equity"] == 50000.0
         assert result["cash"] == 10000.0
         assert result["buying_power"] == 10000.0
         assert result["portfolio_value"] == 40000.0
+        assert result["unsettled_cash"] == 0.0
 
     def test_unwraps_data_envelope(self):
         data = {"data": {
@@ -40,6 +41,25 @@ class TestParsePortfolio:
         assert result["equity"] == 0
         assert result["cash"] == 0
         assert result["buying_power"] == 0
+
+    def test_unsettled_cash_excluded_from_sizing_base(self):
+        # Cash account mid-settlement: $12,083 cash but only $5,176 tradable
+        # (~$6,907 sale proceeds still settling). The sizing base must be the
+        # deployable capital (positions + buying power), NOT total_value, so the
+        # equal-weight target isn't inflated by cash that can't be traded yet.
+        data = {
+            "total_value": "86293.0",
+            "equity_value": "74210.0",
+            "cash": "12083.0",
+            "buying_power": {"buying_power": "5176.0"},
+        }
+        result = RobinhoodBroker.parse_portfolio(data)
+
+        assert result["unsettled_cash"] == 12083.0 - 5176.0      # 6907
+        assert result["equity"] == 74210.0 + 5176.0              # 79386 deployable
+        assert result["total_value"] == 86293.0                  # still exposed
+        # deployable == total_value − unsettled_cash
+        assert result["equity"] == result["total_value"] - result["unsettled_cash"]
 
 
 class TestParsePositions:
@@ -205,6 +225,42 @@ class TestComputeRebalanceOrders:
         )
 
         assert len(orders) == 0
+
+    def test_reserve_shrinks_sizing_base(self):
+        # $10k deployable, reserve $4k → size to an $6k book (target $3k/name).
+        broker = self._make_broker()
+        orders = broker.compute_rebalance_orders(
+            target_tickers=["AAPL", "MSFT"],
+            account={"equity": 10000},
+            current={},
+            reserve=4000,
+        )
+        buys = [o for o in orders if o.side == "buy"]
+        assert len(buys) == 2
+        assert all(o.notional == 3000.0 for o in buys)  # (10000-4000)/2
+
+    def test_reserve_above_cash_trims_to_smaller_book(self):
+        # Fully invested $10k book; reserve $2k pushes the target book to $8k, so
+        # each name trims from 5000 toward 4000 (valid "reduce exposure" input).
+        broker = self._make_broker()
+        orders = broker.compute_rebalance_orders(
+            target_tickers=["AAPL", "MSFT"],
+            account={"equity": 10000},
+            current={"AAPL": 5000, "MSFT": 5000},
+            reserve=2000,
+        )
+        sells = [o for o in orders if o.side == "sell"]
+        assert len(sells) == 2
+        assert all(o.trim and o.notional == 1000.0 for o in sells)  # 5000 - 8000/2
+
+    def test_zero_reserve_matches_no_reserve(self):
+        broker = self._make_broker()
+        common = dict(target_tickers=["AAPL", "MSFT"], account={"equity": 10000},
+                      current={"AAPL": 3000})
+        a = broker.compute_rebalance_orders(**common)
+        b = broker.compute_rebalance_orders(**common, reserve=0.0)
+        assert [(o.ticker, o.side, o.notional) for o in a] \
+            == [(o.ticker, o.side, o.notional) for o in b]
 
 
 class TestFormatMcpOrder:
