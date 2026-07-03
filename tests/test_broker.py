@@ -3,12 +3,13 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
-from screener.trading.broker import AlpacaBroker, RebalanceOrder
+from screener.trading.alpaca import AlpacaBroker
+from screener.trading.broker import RebalanceOrder
 
 
 def _make_broker(mock_client):
     """Create a broker with a mocked TradingClient."""
-    with patch("screener.trading.broker.TradingClient") as mock_cls:
+    with patch("screener.trading.alpaca.TradingClient") as mock_cls:
         mock_cls.return_value = mock_client
         return AlpacaBroker("fake_key", "fake_secret", paper=True)
 

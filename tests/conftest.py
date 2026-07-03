@@ -11,7 +11,7 @@ def _no_broker_poll_sleep(monkeypatch):
     iteration in tests (mocked clients return a terminal state immediately), so
     the only effect is dropping ~2s waits — the broker suite is ~85% of wall time.
     """
-    monkeypatch.setattr("screener.trading.broker.time.sleep", lambda *_: None)
+    monkeypatch.setattr("screener.trading.alpaca.time.sleep", lambda *_: None)
 
 
 @pytest.fixture

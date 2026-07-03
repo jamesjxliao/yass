@@ -1,4 +1,4 @@
-"""The shared _run_rebalance flow (used by `trade` and `etoro-trade`).
+"""The shared _run_rebalance flow (used by `trade-alpaca` and `trade-etoro`).
 
 Dry-run coverage of the money path: it computes picks/weights/orders, calls
 execute_orders in dry-run, writes the trade log, and honors the injected
@@ -13,7 +13,8 @@ import polars as pl
 import pytest
 import typer
 from screener.cli import _run_rebalance
-from screener.trading.broker import AlpacaBroker, RebalanceOrder
+from screener.trading.alpaca import AlpacaBroker
+from screener.trading.broker import RebalanceOrder
 
 
 class _Cfg:
@@ -186,7 +187,7 @@ def _alpaca_account(equity, cash):
 
 def _real_alpaca_broker(client) -> AlpacaBroker:
     """A real AlpacaBroker with only the network client stubbed."""
-    with patch("screener.trading.broker.TradingClient") as mock_cls:
+    with patch("screener.trading.alpaca.TradingClient") as mock_cls:
         mock_cls.return_value = client
         return AlpacaBroker("k", "s", paper=True)
 

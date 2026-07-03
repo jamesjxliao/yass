@@ -183,8 +183,8 @@ poetry run screener screen --top-n 10     # Run screener
 poetry run screener backtest              # Run backtest
 poetry run screener fetch-history         # Fetch historical data into DuckDB
 poetry run screener evaluate              # Full signal evaluation
-poetry run screener trade                 # Rebalance via Alpaca (dry run)
-poetry run screener etoro-trade           # Rebalance via eToro (dry run)
+poetry run screener trade-alpaca          # Rebalance via Alpaca (dry run)
+poetry run screener trade-etoro           # Rebalance via eToro (dry run)
 ```
 
 ## Development

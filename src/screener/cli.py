@@ -810,8 +810,8 @@ def lab(
     cache.close()
 
 
-@app.command()
-def trade(
+@app.command("trade-alpaca")
+def trade_alpaca(
     config: Annotated[Path, typer.Option(help="Config YAML")] = Path("config/default.yaml"),
     dry_run: Annotated[bool, typer.Option(help="Show orders without executing")] = True,
     verbose: Annotated[bool, typer.Option("--verbose")] = False,
@@ -819,7 +819,7 @@ def trade(
     """Rebalance portfolio via Alpaca (paper or live trading)."""
     _setup_logging(verbose)
 
-    from screener.trading.broker import AlpacaBroker
+    from screener.trading.alpaca import AlpacaBroker
 
     settings = Settings()
     if not settings.alpaca_api_key:
@@ -844,11 +844,13 @@ def trade(
         get_holdings=lambda enriched: broker.get_positions(),
         is_live_real=not settings.alpaca_paper,
         live_warning="⚠️  LIVE TRADING — orders will execute with real money!",
+        log_suffix="_alpaca",
+        log_extra={"broker": "alpaca"},
     )
 
 
-@app.command("etoro-trade")
-def etoro_trade(
+@app.command("trade-etoro")
+def trade_etoro(
     config: Annotated[Path, typer.Option(help="Config YAML")] = Path("config/default.yaml"),
     dry_run: Annotated[bool, typer.Option(help="Show orders without executing")] = True,
     verbose: Annotated[bool, typer.Option("--verbose")] = False,

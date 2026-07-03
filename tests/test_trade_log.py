@@ -25,11 +25,11 @@ def test_write_trade_log_alpaca_shape(tmp_path):
         picks=["AAPL", "MSFT"], weighting="equal",
         target_weights={"AAPL": 0.5, "MSFT": 0.5},
         previous_positions=["AAPL"], orders=[order], extended_result=_df(),
-        trade_dir=tmp_path,
+        suffix="_alpaca", extra={"broker": "alpaca"}, trade_dir=tmp_path,
     )
-    assert f.parent == tmp_path and f.suffix == ".json" and not f.stem.endswith("_etoro")
+    assert f.parent == tmp_path and f.stem.endswith("_alpaca")
     log = json.loads(f.read_text())
-    assert "broker" not in log  # the Alpaca log carries no broker key
+    assert log["broker"] == "alpaca"  # explicit since the jul-2026 trade-alpaca rename
     assert log["mode"] == "paper"
     assert log["picks"] == ["AAPL", "MSFT"]
     assert log["orders"][0] == {
