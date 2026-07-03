@@ -13,30 +13,29 @@ Screen stocks using fundamental signals, backtest with point-in-time data, and e
 ![Monthly Returns](docs/images/monthly_returns.png)
 
 ```mermaid
-flowchart LR
+flowchart TB
     subgraph DATA["1. Get Data"]
-        API["Data API (Sharadar / FMP)"] --> CACHE[(DuckDB Cache)]
-        CACHE --> PIT[PIT Server]
+        direction LR
+        API["Data API (Sharadar / FMP)"] --> CACHE[(DuckDB Cache)] --> PIT[PIT Server]
     end
 
     subgraph SCREEN["2. Screen Stocks"]
-        direction TB
-        FILT["Filters\n❌ Remove bad stocks"] --> SIG["Signals\n📊 Score remaining"]
-        SIG --> RANK["Rank\n🏆 Pick top N"]
+        direction LR
+        FILT["Filters\n❌ Remove bad stocks"] --> SIG["Signals\n📊 Score remaining"] --> RANK["Rank\n🏆 Pick top N"]
     end
 
     subgraph TEST["3. Evaluate"]
-        direction TB
-        BT[Backtest] --> WF[Walk-Forward]
-        WF --> EVAL["Monte Carlo\nFactor Attribution\nRegime Analysis"]
+        direction LR
+        BT[Backtest] --> WF[Walk-Forward] --> EVAL["Monte Carlo\nFactor Attribution\nRegime Analysis"]
     end
 
     subgraph USE["4. Use"]
+        direction LR
         CLI["CLI\n📋 picks + reports"]
         TRADE["Brokers\n💸 Alpaca · eToro"]
     end
 
-    PIT -->|prices + fundamentals| SCREEN
+    DATA -->|prices + fundamentals| SCREEN
     SCREEN -->|ranked picks| TEST
     TEST -->|metrics + charts| CLI
     SCREEN -->|target portfolio| TRADE
