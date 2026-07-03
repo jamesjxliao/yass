@@ -68,7 +68,7 @@ No API key? No problem — the screener falls back to mock data so you can explo
 
 ## Included Signals
 
-The repo ships with 9 signals — use them as-is or adjust weights in `config/example.yaml`:
+The repo ships with 8 signals — use them as-is or adjust weights in `config/example.yaml`:
 
 | Signal | What It Captures |
 |---|---|
@@ -77,9 +77,9 @@ The repo ships with 9 signals — use them as-is or adjust weights in `config/ex
 | `low_leverage_growth` | Growth funded by cash flow, not debt |
 | `quality_score` | Composite quality: ROE, ROIC, ROA, R&D efficiency, low debt |
 | `margin_expansion` | Gross + operating margin improvement YoY |
-| `efficiency_acceleration` | Revenue/EPS growth acceleration + SGA leverage |
-| `value_composite` | Multi-factor value: earnings yield, FCF yield, EV/sales |
 | `quality_at_discount` | Beaten-down quality stocks with FCF + low debt |
+| `quality_midcap` | Mid-cap quality + value blend: ROE, ROIC, ROA, low debt, earnings yield |
+| `quality_at_discount_midcap` | Mid-cap variant of quality-at-discount |
 
 ## Configuration
 
@@ -110,6 +110,8 @@ signals:
 
 Signal names must match the `name` attribute on the signal class (e.g. `momentum_12m`, not `momentum`); the loader raises if a name isn't found.
 
+An optional top-level `weighting: equal | inverse_vol` key (default `equal`) sets position sizing: `inverse_vol` sizes each pick proportional to 1/`realized_vol_20d`, applied consistently across the backtest, broker rebalancing, and the `target_weight` column in screen output.
+
 Change the signals, adjust the weights, run `poetry run screener backtest` to see the results.
 
 ## Key Features
@@ -121,6 +123,7 @@ Change the signals, adjust the weights, run `poetry run screener backtest` to se
 - **Polars + Arrow** — Fast DataFrame operations with zero-copy interchange to DuckDB.
 - **Position stop-loss** — Optional per-period stop-loss (disabled by default — intraday whipsaw hurts momentum strategies).
 - **Hold bonus** — Z-score boost for current holdings to reduce turnover and improve after-tax returns.
+- **Position weighting** — equal-weight or inverse-volatility sizing (`weighting` config key), identical in backtest and live orders.
 - **Broker integration** — Rebalance via Alpaca or eToro with dry-run safety and trade logging.
 - **Mock data provider** — Explore the full framework without an API key.
 
@@ -137,6 +140,8 @@ Fields available for building signals:
 | **Efficiency** | `sga_to_revenue`, `rd_to_revenue`, `sbc_to_revenue`, `capex_to_revenue`, `cash_conversion_cycle` |
 | **Price** | `momentum_12m_return`, `sma_200`, `realized_vol_20d`, `avg_volume_20d`, `beta` |
 | **Other** | `analyst_target`, `insider_buy_ratio`, `intangibles_to_assets`, `sector` |
+
+> `beta`, `analyst_target`, and `insider_buy_ratio` are **FMP-only** — they are absent under Sharadar (the preferred provider), so signals using them should guard on column presence.
 
 ## Writing a Custom Signal
 
