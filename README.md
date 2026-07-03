@@ -12,6 +12,8 @@ Screen stocks using fundamental signals, backtest with point-in-time data, and e
 
 ![Monthly Returns](docs/images/monthly_returns.png)
 
+> **Read the numbers honestly:** these are in-sample results (10 bps round-trip costs, survivorship-free S&P 500 membership, Sharadar data). On 108 monthly returns, the stationary-block-bootstrap 90% confidence interval on that Sharpe is **[0.37, 1.38]** — a 9-year backtest is a noisy point estimate, not a promise. The interval comes from `src/screener/evaluation/robustness.py`; `poetry run screener evaluate` reproduces the charts.
+
 ```mermaid
 flowchart TB
     subgraph DATA["1. Get Data"]
