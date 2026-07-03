@@ -9,6 +9,7 @@ import httpx
 import polars as pl
 
 from screener.data.cache import CacheManager
+from screener.data.fields import PASSTHROUGH_FIELDS, RENAMED_FIELDS
 from screener.data.splits import heal_split_prices
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,19 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 BASE_URL = "https://financialmodelingprep.com/stable"
 MAX_CALLS_PER_MINUTE = 720  # FMP limit is 750, leave margin
+
+
+class FMPAuthError(RuntimeError):
+    """FMP rejected the API key (HTTP 401) — cancelled/downgraded/invalid key.
+
+    Deliberately NOT an httpx exception: every fetch method here swallows
+    ``httpx.HTTPError``/``HTTPStatusError`` and returns empty, so a dead key
+    would otherwise silently yield empty fundamentals for the whole universe and
+    the screener would trade on garbage. This propagates through those handlers
+    and fails the run loudly instead. (A 403 on a constituent endpoint is a
+    different thing — a plan restriction — and still falls back to the hardcoded
+    list; only 401 = rejected key raises.)
+    """
 
 
 class FMPProvider:
@@ -65,6 +79,14 @@ class FMPProvider:
         for attempt in range(retries + 1):
             try:
                 resp = self._client.get(url, params=params)
+                if resp.status_code == 401:
+                    # Rejected key — don't retry (pointless) and don't let the
+                    # per-method httpx handlers swallow it into an empty result.
+                    raise FMPAuthError(
+                        "FMP rejected the API key (HTTP 401) — key invalid, "
+                        "cancelled, or plan downgraded. Verify FMP_API_KEY and "
+                        "that your plan covers the requested endpoints."
+                    )
                 resp.raise_for_status()
                 data = resp.json()
                 if isinstance(data, str):
@@ -322,9 +344,11 @@ class FMPProvider:
     def get_universe(self, index: str) -> list[str]:
         """Get index constituents.
 
-        On a genuine plan/permission restriction (401/403/404) fall back to the
-        frozen hardcoded list — the intended steady state on restricted plans.
-        But on a TRANSIENT failure (5xx / network / timeout) RAISE rather than
+        On a plan/permission restriction (403/404) fall back to the frozen
+        hardcoded list — the intended steady state on restricted plans. A 401
+        (rejected key) is NOT a plan restriction: it raises FMPAuthError from
+        _get before reaching here, so a dead key never silently substitutes a
+        stale ~2022 list. On a TRANSIENT failure (5xx / network / timeout) RAISE rather than
         return the stale fallback: CachedFMPProvider.get_universe caches this
         result for 30 days and UniverseManager.sync rewrites the survivorship-safe
         PIT membership table from it, so silently substituting a ~2022 list would
@@ -344,7 +368,7 @@ class FMPProvider:
                     return [row["symbol"] for row in data]
             except httpx.HTTPStatusError as e:
                 status = e.response.status_code if e.response is not None else None
-                if status not in (401, 403, 404):
+                if status not in (403, 404):
                     raise  # transient/server error — do NOT cache a stale fallback
                 logger.warning(
                     "Constituent endpoint restricted (HTTP %s), using hardcoded list",
@@ -387,19 +411,16 @@ _RENAME_MAP = {
     "netDebtToEBITDA": "net_debt_to_ebitda",
 }
 
-# Fields injected by enrich_profile_row (already use our naming)
-_PASSTHROUGH_FIELDS = [
-    "beta",
-    "gross_margin_current", "gross_margin_prior",
-    "op_margin_current", "op_margin_prior",
-    "eps_growth_current", "eps_growth_prior",
-    "rev_growth_current", "rev_growth_prior",
-    "analyst_target", "insider_buy_ratio",
-    "sga_to_revenue", "sga_to_revenue_prior",
-    "rd_to_revenue", "sbc_to_revenue",
-    "income_quality", "capex_to_revenue",
-    "intangibles_to_assets", "cash_conversion_cycle",
-]
+# Fields injected by enrich_profile_row (already use our naming). The canonical
+# list lives in the vendor-neutral field schema; imported so the FMP field map
+# and the PIT field list can't drift apart.
+_PASSTHROUGH_FIELDS = PASSTHROUGH_FIELDS
+
+# _RENAME_MAP's *values* (our names) must equal the vendor-neutral RENAMED_FIELDS,
+# in order — pit_server derives PIT_FIELDS from that list, not from this map.
+assert list(_RENAME_MAP.values()) == RENAMED_FIELDS, (
+    "fmp._RENAME_MAP drifted from data.fields.RENAMED_FIELDS"
+)
 
 # Combined map for PIT snapshot iteration
 _FIELD_MAP = {**_RENAME_MAP, **{f: f for f in _PASSTHROUGH_FIELDS}}

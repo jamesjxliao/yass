@@ -6,15 +6,17 @@ from datetime import date, timedelta
 import polars as pl
 
 from screener.data.cache import CacheManager
-from screener.data.fmp import _FIELD_MAP
+from screener.data.fields import PIT_FIELDS as _CANONICAL_PIT_FIELDS
 from screener.data.pit import PITQuery
 from screener.data.provider import DataProvider
 from screener.data.universe import UniverseManager
 
 logger = logging.getLogger(__name__)
 
-# Derive PIT fields from the FMP field mapping (single source of truth)
-PIT_FIELDS = list(_FIELD_MAP.values())
+# The vendor-neutral screening-field list (see data/fields.py). A local copy, so
+# experiment scripts that extend pit_server.PIT_FIELDS at runtime (to add
+# research-only fields) don't mutate the canonical module-level list.
+PIT_FIELDS = list(_CANONICAL_PIT_FIELDS)
 
 
 class PITDataServer:
