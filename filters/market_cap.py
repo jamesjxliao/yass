@@ -11,4 +11,6 @@ class MarketCapFilter:
         self.min_cap = min_cap
 
     def apply(self, df: pl.DataFrame) -> pl.Series:
+        # null market_cap -> null mask -> row dropped by df.filter (fail-closed:
+        # a name of unknown size must not pass a size gate)
         return df["market_cap"] >= self.min_cap

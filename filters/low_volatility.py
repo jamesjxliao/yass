@@ -20,4 +20,6 @@ class LowVolatilityFilter:
     def apply(self, df: pl.DataFrame) -> pl.Series:
         if "realized_vol_20d" not in df.columns:
             return pl.Series([True] * len(df))
+        # null vol -> passes (fail-open): missing history is not the M&A
+        # low-vol pattern this filter targets
         return df["realized_vol_20d"].fill_null(1.0) >= self.min_vol

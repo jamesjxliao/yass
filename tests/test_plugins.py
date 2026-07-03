@@ -106,3 +106,59 @@ def test_market_cap_filter_threshold():
     mask = f.apply(df)
     # market_cap goes from 1e9 to 10e9, so 5e9+ means indices 4-9 (6 stocks)
     assert mask.sum() == 6
+
+
+class TestNullPolarity:
+    """Pin every production plugin's missing-data behavior — the convention is
+    documented on the Filter/Signal protocols; these tests keep it from
+    silently flipping in an edit."""
+
+    def test_market_cap_filter_fails_closed_on_null(self):
+        from filters.market_cap import MarketCapFilter
+
+        df = pl.DataFrame({"ticker": ["A", "B"], "market_cap": [5e10, None]})
+        kept = df.filter(MarketCapFilter(min_cap=1e9).apply(df))
+        assert kept["ticker"].to_list() == ["A"]  # null dropped
+
+    def test_volume_filter_fails_closed_on_null(self):
+        from filters.volume import VolumeFilter
+
+        df = pl.DataFrame({"ticker": ["A", "B"], "avg_volume_20d": [1e6, None]})
+        kept = df.filter(VolumeFilter(min_avg_volume=5e5).apply(df))
+        assert kept["ticker"].to_list() == ["A"]
+
+    def test_low_volatility_filter_fails_open_on_null(self):
+        from filters.low_volatility import LowVolatilityFilter
+
+        df = pl.DataFrame({"ticker": ["A", "B"],
+                           "realized_vol_20d": [0.01, None]})
+        kept = df.filter(LowVolatilityFilter(min_vol=0.08).apply(df))
+        assert kept["ticker"].to_list() == ["B"]  # collapsed vol out, null in
+
+    def test_all_signals_neutralize_on_all_null_values(self):
+        """All-null inputs must z-score to neutral 0 for every discovered
+        signal — never crash, never produce an extreme score."""
+        from screener.engine.ranking import z_score_normalize
+
+        signals = discover_signals(SIGNALS_DIR)
+        base = make_fundamentals(4)
+        df = base.with_columns([
+            pl.lit(None, dtype=pl.Float64).alias(c)
+            for c in base.columns if c not in ("ticker", "sector")
+        ])
+        for name, s in signals.items():
+            z = z_score_normalize(s.compute(df), s.higher_is_better)
+            assert z.abs().max() == 0.0, f"{name} not neutral on all-null input"
+
+
+def test_loader_surfaces_non_normalized_weights(caplog):
+    import logging
+
+    from screener.plugins.loader import load_signals
+
+    with caplog.at_level(logging.INFO, logger="screener.plugins.loader"):
+        loaded = load_signals(
+            [{"name": "piotroski_f", "weight": 0.35},
+             {"name": "quality_score", "weight": 0.40}], SIGNALS_DIR)
+    assert abs(sum(w for _, w in loaded) - 1.0) < 1e-9
+    assert any("normalizing to 1.0" in r.message for r in caplog.records)

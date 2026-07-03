@@ -89,6 +89,12 @@ def load_signals(
                 f"Signal weights sum to {total_weight} (must be > 0); all-zero/"
                 "negative weights yield an order-dependent, meaningless ranking."
             )
+        if abs(total_weight - 1.0) > 0.01:
+            effective = ", ".join(
+                f"{s.name} {w / total_weight:.1%}" for s, w in loaded)
+            logger.info(
+                "Signal weights sum to %.4g — normalizing to 1.0 "
+                "(effective: %s)", total_weight, effective)
         loaded = [(s, w / total_weight) for s, w in loaded]
 
     return loaded

@@ -11,4 +11,6 @@ class VolumeFilter:
         self.min_avg_volume = min_avg_volume
 
     def apply(self, df: pl.DataFrame) -> pl.Series:
+        # null volume -> null mask -> row dropped by df.filter (fail-closed:
+        # unknown liquidity must not pass a liquidity gate)
         return df["avg_volume_20d"] >= self.min_avg_volume
