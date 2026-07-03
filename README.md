@@ -32,12 +32,14 @@ flowchart LR
     end
 
     subgraph USE["4. Use"]
-        CLI[CLI]
+        CLI["CLI\n📋 picks + reports"]
+        TRADE["Brokers\n💸 Alpaca · eToro"]
     end
 
     PIT -->|prices + fundamentals| SCREEN
     SCREEN -->|ranked picks| TEST
-    TEST -->|metrics + charts| USE
+    TEST -->|metrics + charts| CLI
+    SCREEN -->|target portfolio| TRADE
 ```
 
 ## Quick Start
