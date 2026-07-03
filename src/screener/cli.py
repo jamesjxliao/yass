@@ -911,6 +911,20 @@ def trade_etoro(
     )
 
 
+@app.command()
+def track(
+    reseed: Annotated[bool, typer.Option(
+        help="Rebuild the cash-flow ledger candidates")] = False,
+) -> None:
+    """Live-vs-backtest tracking: model returns of logged holdings vs realized,
+    deposit-adjusted account equity per broker."""
+    from screener.evaluation.tracking import report
+
+    settings = Settings()
+    report(settings.db_path, Path("results/trades"), Path("results/tracking"),
+           reseed=reseed)
+
+
 @app.command("list-plugins")
 def list_plugins(
     verbose: Annotated[bool, typer.Option("--verbose")] = False,

@@ -128,6 +128,7 @@ Change the signals, adjust the weights, run `poetry run screener backtest` to se
 - **Hold bonus** — Z-score boost for current holdings to reduce turnover and improve after-tax returns.
 - **Position weighting** — equal-weight or inverse-volatility sizing (`weighting` config key), identical in backtest and live orders.
 - **Broker integration** — Rebalance via Alpaca or eToro with dry-run safety and trade logging.
+- **Live tracking** — `screener track` compares realized, deposit-adjusted account returns against the model returns of your logged holdings — the true out-of-sample record.
 - **Mock data provider** — Explore the full framework without an API key.
 
 ## Available Data Fields
@@ -193,6 +194,7 @@ poetry run screener fetch-history         # Fetch historical data into DuckDB
 poetry run screener evaluate              # Full signal evaluation
 poetry run screener trade-alpaca          # Rebalance via Alpaca (dry run)
 poetry run screener trade-etoro           # Rebalance via eToro (dry run)
+poetry run screener track                 # Live-vs-backtest tracking report
 ```
 
 ## Development

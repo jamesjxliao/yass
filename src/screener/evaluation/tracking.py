@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
@@ -245,3 +245,94 @@ def build_periods(events: dict[str, list[LogRecord]],
                         p.flags.append("gap>5% — missing cash flow?")
             periods.append(p)
     return periods
+
+
+def load_or_seed_ledger(recs: list[LogRecord], ledger_path: Path,
+                        reseed: bool = False) -> list[CashFlow]:
+    """Load the user-editable cash-flow ledger; seed it with detected
+    candidates on first run (or when reseed is set)."""
+    if ledger_path.exists() and not reseed:
+        rows = json.loads(ledger_path.read_text())
+        return [CashFlow(broker=r["broker"], on=date.fromisoformat(r["date"]),
+                         amount=float(r["amount"]), note=r.get("note", ""),
+                         inferred=bool(r.get("inferred", False)),
+                         ts=datetime.fromisoformat(r["ts"]) if r.get("ts") else None)
+                for r in rows]
+    flows = detect_cash_flows(recs)
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_path.write_text(json.dumps(
+        [{"broker": f.broker, "date": str(f.on), "amount": f.amount,
+          "ts": f.ts.isoformat() if f.ts else None,
+          "note": f.note, "inferred": f.inferred} for f in flows], indent=2))
+    print(f"[ledger] seeded {len(flows)} candidate cash flows -> {ledger_path}\n"
+          f"[ledger] review/edit that file (amounts, missed deposits), then re-run.")
+    return flows
+
+
+def report(db_path: str, trade_dir: Path, track_dir: Path,
+           reseed: bool = False) -> None:
+    """Print the per-broker live-vs-backtest report and save it as JSON.
+
+    Cumulative rows compound ONLY periods where both sides are measured and
+    prices are final, so the comparison stays apples-to-apples.
+    """
+    from screener.data.cache import CacheManager
+
+    recs = load_history(trade_dir)
+    events = rebalance_events(recs)
+    ledger = load_or_seed_ledger(recs, track_dir / "cash_flows.json", reseed)
+
+    tickers = sorted({t for seq in events.values() for r in seq for t in r.holdings}
+                     | {"SPY"})
+    cache = CacheManager(db_path)
+    ph = ",".join("?" * len(tickers))
+    prices = cache.to_polars(
+        f"SELECT ticker, date, close FROM price_cache "
+        f"WHERE ticker IN ({ph}) AND date >= '2026-03-01'", tickers)
+    cache.close()
+
+    periods = build_periods(events, prices, ledger)
+
+    def pct(x):
+        return f"{100 * x:+7.2f}%" if x is not None else "      \u2014"
+
+    rows = []
+    for broker in sorted(events):
+        ps = [p for p in periods if p.broker == broker]
+        if not ps:
+            continue
+        print(f"\n=== {broker} ===")
+        print(f"{'period':<25}{'n':>3}{'model':>9}{'realized':>10}{'SPY':>9}"
+              f"{'gap(bp)':>9}  flags")
+        cum_m = cum_r = cum_s = 1.0
+        for p in ps:
+            gap = (None if p.model_ret is None or p.realized_ret is None
+                   else 10000 * (p.realized_ret - p.model_ret))
+            if (p.model_ret is not None and p.realized_ret is not None
+                    and "pending-prices" not in p.flags):
+                cum_m *= 1 + p.model_ret
+                cum_r *= 1 + p.realized_ret
+                if p.spy_ret is not None:
+                    cum_s *= 1 + p.spy_ret
+            line = (f"{str(p.start)} - {str(p.end):<13}{len(p.holdings):>3}"
+                    f"{pct(p.model_ret)}{pct(p.realized_ret)}{pct(p.spy_ret)}")
+            line += f"{gap:>+9.0f}" if gap is not None else f"{'\u2014':>9}"
+            if p.flags:
+                line += f"  {';'.join(p.flags)}"
+            print(line)
+            rows.append({**asdict(p), "start": str(p.start), "end": str(p.end),
+                         "gap_bps": gap})
+        print(f"{'CUMULATIVE':<25}{'':>3}{pct(cum_m - 1)}{pct(cum_r - 1)}"
+              f"{pct(cum_s - 1)}{10000 * (cum_r - cum_m):>+9.0f}")
+        rows.append({"broker": broker, "cumulative": True,
+                     "model": cum_m - 1, "realized": cum_r - 1,
+                     "spy": cum_s - 1})
+
+    track_dir.mkdir(parents=True, exist_ok=True)
+    out = track_dir / "tracking_report.json"
+    out.write_text(json.dumps(rows, indent=2, default=str))
+    print(f"\n[saved] {out}")
+    inferred = [f for f in ledger if f.inferred]
+    if inferred:
+        print(f"[note] {len(inferred)} cash flows are auto-inferred \u2014 "
+              f"verify them in {track_dir / 'cash_flows.json'}")
