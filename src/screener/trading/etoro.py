@@ -347,7 +347,17 @@ class EtoroBroker:
     def _execute_trim(
         self, order: RebalanceOrder, positions: list[EtoroPosition],
     ) -> None:
-        """Partially close positions to reduce a holding by order.notional dollars."""
+        """Partially close positions to reduce a holding by order.notional dollars.
+
+        Sub-positions are consumed HIFO — highest ``open_rate`` (cost basis)
+        first — so a trim realizes the smallest gain (or largest loss) per unit
+        sold. eToro closes are per-sub-position, so lot choice is ours to make;
+        the old largest-``units``-first order was tax-blind and, because early
+        lots are usually both the largest and the lowest-basis, tended to
+        realize the *biggest* embedded gains — FIFO-style lot cycling that
+        converts long-term gains into short-term ones in a taxable account.
+        Ties fall back to largest-units-first to minimize close calls.
+        """
         total_value = sum(p.amount + p.pnl for p in positions)
         total_units = sum(p.units for p in positions)
         if total_value <= 0 or total_units <= 0:
@@ -355,7 +365,9 @@ class EtoroBroker:
         price_per_unit = total_value / total_units
         units_to_sell = order.notional / price_per_unit
 
-        sorted_positions = sorted(positions, key=lambda p: p.units, reverse=True)
+        sorted_positions = sorted(
+            positions, key=lambda p: (p.open_rate, p.units), reverse=True
+        )
         remaining = units_to_sell
         for i, pos in enumerate(sorted_positions):
             if remaining <= 0:

@@ -259,6 +259,32 @@ class TestExecuteTrim:
         # Should deduct from largest first (both equal at 2.5)
         assert broker._close_position.call_count == 2
 
+    def test_trim_consumes_highest_basis_lot_first(self):
+        """HIFO: the trim must close the highest-open_rate sub-position first
+        (smallest realized gain / largest realized loss), NOT the largest lot —
+        the early low-basis lot is usually the biggest embedded gain."""
+        from screener.trading.broker import RebalanceOrder
+        from screener.trading.etoro import EtoroPosition
+
+        broker = self._make_broker()
+        order = RebalanceOrder(ticker="STX", side="sell", notional=300, trim=True)
+        positions = [
+            # Big, old, LOW-basis lot (large embedded gain) — must NOT be touched.
+            EtoroPosition(position_id=1, instrument_id=4356, ticker="STX",
+                          amount=3000, units=4.0, open_rate=750.0, pnl=1000),
+            # Small, HIGH-basis lot (embedded loss at current ~$1000/unit).
+            EtoroPosition(position_id=2, instrument_id=4356, ticker="STX",
+                          amount=2200, units=2.0, open_rate=1100.0, pnl=-200),
+        ]
+
+        broker._execute_trim(order, positions)
+
+        # $300 at $1000/unit = 0.3 units — fits entirely in the high-basis lot.
+        broker._close_position.assert_called_once()
+        call_args = broker._close_position.call_args
+        assert call_args[0][0] == 2  # the open_rate=1100 lot, not the big one
+        assert abs(call_args[1]["units_to_deduct"] - 0.3) < 0.01
+
 
 class TestExecuteOrdersStopLoss:
     """Stop-loss must be set on every buy or the buy is skipped."""

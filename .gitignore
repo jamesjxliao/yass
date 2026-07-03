@@ -17,8 +17,13 @@ data/*.png
 data/*.txt
 !data/sp400/
 
-# Results
-results/
+# Results — bulk regenerable output stays ignored; the trading record (trade
+# logs + cash-flow ledger) is versioned: it is hand-curated and cannot be
+# reconstructed, unlike evaluation/chart output.
+results/*
+!results/trades/
+!results/tracking/
+results/tracking/tracking_report.json
 
 # Autoresearch
 *.log
