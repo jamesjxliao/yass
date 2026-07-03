@@ -43,3 +43,8 @@ data/lazy_prices/*
 # SF2 insider data: licensed Sharadar raw rows — local-only, never committed
 # (regenerable via fetch_insider_sf2.py)
 data/insider_sf2/
+# SF3A institutional 13F summary: licensed Sharadar raw rows — local-only
+# (regenerable via fetch_sf3a.py)
+data/sf3a/
+# HF earnings-call transcripts (MIT) + derived metrics — too large for git
+data/transcripts/
