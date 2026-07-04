@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime
 
 import polars as pl
 import pytest
 from screener.evaluation.tracking import (
     CashFlow,
+    LogRecord,
     build_periods,
     detect_cash_flows,
+    execution_decomposition,
     load_history,
     parse_trade_log,
     portfolio_return,
@@ -140,3 +142,50 @@ def test_detect_cash_flows_same_day_jump(tmp_path):
     assert len(flows) == 1
     assert flows[0].amount == pytest.approx(5000.0)
     assert flows[0].inferred is True
+
+
+def _rec_with_orders(orders, *, equity=10_000.0, ts=None):
+    ts = ts or datetime(2026, 6, 1, 9, 35)
+    return LogRecord(
+        broker="alpaca_paper", ts=ts, log_date=ts.date(), equity=equity,
+        holdings=[o["ticker"] for o in orders], executed=True,
+        file="x.json", orders=orders,
+    )
+
+
+def _close_frame(rows):
+    return pl.DataFrame(
+        {"ticker": [t for t, _ in rows], "date": [date(2026, 6, 1)] * len(rows),
+         "close": [c for _, c in rows]})
+
+
+def test_execution_decomposition_splits_timing_and_slippage():
+    # model close 100; arrived at 100.5 (timing +50bp); filled at 101 (slip ~+50bp);
+    # total fill-vs-close = +100bp of the $1,000 trade => +10bp of the $10k book.
+    rec = _rec_with_orders([
+        {"ticker": "AAPL", "side": "buy", "notional": 1000.0,
+         "arrival_price": 100.5, "fill_price": 101.0}])
+    [row] = execution_decomposition({"alpaca_paper": [rec]}, _close_frame([("AAPL", 100.0)]))
+    assert row["n_fills"] == 1
+    assert row["exec_cost_bp_traded"] == pytest.approx(100.0, abs=0.5)
+    assert row["exec_cost_bp_book"] == pytest.approx(10.0, abs=0.1)
+    assert row["timing_bp_traded"] == pytest.approx(50.0, abs=0.5)
+    assert row["slippage_bp_traded"] == pytest.approx(49.75, abs=0.5)
+
+
+def test_execution_decomposition_sell_and_no_arrival():
+    # eToro-style: fill only, no arrival. A sell filled BELOW the model close is a
+    # cost (received less). timing/slippage stay None without arrival.
+    rec = _rec_with_orders([
+        {"ticker": "MSFT", "side": "sell", "notional": 500.0, "fill_price": 99.0}])
+    [row] = execution_decomposition({"alpaca_paper": [rec]}, _close_frame([("MSFT", 100.0)]))
+    assert row["exec_cost_bp_traded"] == pytest.approx(100.0, abs=0.5)  # (100-99)/100
+    assert row["timing_bp_traded"] is None
+    assert row["slippage_bp_traded"] is None
+
+
+def test_execution_decomposition_ignores_uninstrumented_orders():
+    # pre-instrumentation logs (no fill_price) contribute nothing.
+    rec = _rec_with_orders([
+        {"ticker": "AAPL", "side": "buy", "notional": 1000.0, "status": "submitted"}])
+    assert execution_decomposition({"alpaca_paper": [rec]}, _close_frame([("AAPL", 100.0)])) == []

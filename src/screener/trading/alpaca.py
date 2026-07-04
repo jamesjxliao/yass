@@ -100,14 +100,21 @@ class AlpacaBroker:
         except Exception:
             return None
 
-    def _submit_order(self, order: RebalanceOrder, close_position: bool = False) -> None:
-        """Submit a single market order."""
+    def _submit_order(self, order: RebalanceOrder, close_position: bool = False):
+        """Submit a single market order. Returns the Alpaca order object (for
+        later fill-price capture), or None if the SDK returned nothing.
+
+        Records ``order.arrival_price`` — the latest trade price captured the
+        instant before submission — so the tracker can separate timing drift
+        (arrival vs the model's close) from execution slippage (fill vs arrival).
+        """
+        order.arrival_price = self._get_last_price(order.ticker)
         if close_position and order.side == "sell":
             # Close entire position to avoid fractional qty rounding issues
-            self._client.close_position(order.ticker)
+            aorder = self._client.close_position(order.ticker)
             order.status = "submitted"
             logger.info("SELL %s (close position) — submitted", order.ticker)
-            return
+            return aorder
 
         side = OrderSide.BUY if order.side == "buy" else OrderSide.SELL
         req = MarketOrderRequest(
@@ -116,12 +123,31 @@ class AlpacaBroker:
             side=side,
             time_in_force=TimeInForce.DAY,
         )
-        self._client.submit_order(req)
+        aorder = self._client.submit_order(req)
         order.status = "submitted"
         logger.info(
             "%s %s $%.2f — submitted",
             order.side.upper(), order.ticker, order.notional,
         )
+        return aorder
+
+    def _capture_fill_prices(
+        self, orders: list[RebalanceOrder], id_map: dict[str, str]
+    ) -> None:
+        """Stamp ``fill_price`` from each order's ``filled_avg_price`` once it has
+        filled. Best-effort and never raises — instrumentation must not disturb
+        the execution path."""
+        for o in orders:
+            oid = id_map.get(o.ticker)
+            if not oid:
+                continue
+            try:
+                ao = self._client.get_order_by_id(oid)
+                fap = getattr(ao, "filled_avg_price", None)
+                if fap is not None:
+                    o.fill_price = float(fap)
+            except Exception:  # noqa: BLE001 — telemetry only
+                logger.debug("Could not fetch fill price for %s", o.ticker)
 
     def _wait_for_fills(self, orders: list[RebalanceOrder], timeout: int = 60) -> None:
         """Wait for submitted orders to fill. Polls every 2 seconds."""
@@ -179,6 +205,7 @@ class AlpacaBroker:
 
         # Phase 1: Cancel existing orders, execute sells
         self.cancel_open_orders()
+        alpaca_ids: dict[str, str] = {}  # ticker -> Alpaca order id, for fill capture
         target_tickers = {o.ticker for o in buys}
         for o in sells:
             if o.trim:
@@ -186,7 +213,9 @@ class AlpacaBroker:
         for order in sells:
             try:
                 is_exit = order.ticker not in target_tickers
-                self._submit_order(order, close_position=is_exit)
+                aorder = self._submit_order(order, close_position=is_exit)
+                if aorder is not None and getattr(aorder, "id", None):
+                    alpaca_ids[order.ticker] = str(aorder.id)
             except Exception as e:
                 order.status = f"error: {e}"
                 logger.error("SELL %s $%.2f — FAILED: %s", order.ticker, order.notional, e)
@@ -195,6 +224,7 @@ class AlpacaBroker:
         if sells:
             logger.info("Waiting for %d sell orders to fill...", len(sells))
             self._wait_for_fills(sells)
+            self._capture_fill_prices(sells, alpaca_ids)
             # A broker can ACCEPT a sell then asynchronously reject/cancel it; it
             # leaves the OPEN set so _wait_for_fills treats it as done, but the
             # position never cleared. Re-query positions: any full-exit name still
@@ -249,7 +279,9 @@ class AlpacaBroker:
                     order.status = "skipped"
                     continue
                 try:
-                    self._submit_order(order)
+                    aorder = self._submit_order(order)
+                    if aorder is not None and getattr(aorder, "id", None):
+                        alpaca_ids[order.ticker] = str(aorder.id)
                     cash_remaining -= order.notional
                 except Exception as e:
                     order.status = f"error: {e}"
@@ -261,6 +293,7 @@ class AlpacaBroker:
             if submitted_buys:
                 logger.info("Waiting for %d buy orders to fill...", len(submitted_buys))
                 self._wait_for_fills(submitted_buys)
+                self._capture_fill_prices(submitted_buys, alpaca_ids)
 
         # Place stop-losses for all held positions
         if stop_loss_pct > 0:

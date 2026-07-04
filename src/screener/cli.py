@@ -114,7 +114,13 @@ def _write_trade_log(
         "previous_positions": previous_positions,
         "orders": [
             {"ticker": o.ticker, "side": o.side,
-             "notional": o.notional, "status": o.status}
+             "notional": o.notional, "status": o.status,
+             # Execution-quality fields (None on dry runs / until filled) — the
+             # tracker decomposes its gap from these. Kept even when null so the
+             # schema is stable and `screener track` can tell "instrumented,
+             # unfilled" from "pre-instrumentation log" (key absent).
+             "arrival_price": getattr(o, "arrival_price", None),
+             "fill_price": getattr(o, "fill_price", None)}
             for o in (orders or [])
         ],
         "screen_results": screen_results,

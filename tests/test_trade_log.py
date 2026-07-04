@@ -34,9 +34,26 @@ def test_write_trade_log_alpaca_shape(tmp_path):
     assert log["picks"] == ["AAPL", "MSFT"]
     assert log["orders"][0] == {
         "ticker": "AAPL", "side": "buy", "notional": 100.0, "status": "submitted",
+        "arrival_price": None, "fill_price": None,
     }
     assert len(log["screen_results"]) == 2
     assert "z_quality_score" in log["screen_results"][0]
+
+
+def test_write_trade_log_carries_execution_prices(tmp_path):
+    """A filled live order persists arrival/fill so the tracker can decompose."""
+    order = RebalanceOrder(ticker="AAPL", side="buy", notional=100.0)
+    order.status = "submitted"
+    order.arrival_price = 189.50
+    order.fill_price = 189.92
+    f = _write_trade_log(
+        broker_mode="live", dry_run=False, account={"equity": 1000, "cash": 50},
+        picks=["AAPL"], weighting="equal", target_weights={"AAPL": 1.0},
+        previous_positions=[], orders=[order], extended_result=_df(),
+        trade_dir=tmp_path,
+    )
+    o = json.loads(f.read_text())["orders"][0]
+    assert o["arrival_price"] == 189.50 and o["fill_price"] == 189.92
 
 
 def test_write_trade_log_etoro_variant(tmp_path):

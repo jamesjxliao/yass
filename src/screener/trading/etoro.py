@@ -653,6 +653,25 @@ class EtoroBroker:
                             order.ticker, _SETTLE_TIMEOUT_SECONDS,
                         )
 
+            # Capture fill prices (telemetry): a freshly-opened position's
+            # open_rate IS its execution price, so tracking can measure eToro's
+            # spread/markup vs the model close. Best-effort, post-execution, must
+            # never disturb the (already-complete) rebalance. Only confirmed
+            # swap-in buys get a clean single-lot open_rate; sells aren't captured
+            # (the position is gone after a close). arrival_price is left None —
+            # for eToro the fill-vs-model-close gap already isolates the spread.
+            confirmed = [o for o in submitted if o.status == "submitted"]
+            if confirmed:
+                try:
+                    open_rates = {p.ticker: p.open_rate
+                                  for p in self.get_positions_detailed() if p.open_rate}
+                    for order in confirmed:
+                        rate = open_rates.get(order.ticker)
+                        if rate:
+                            order.fill_price = float(rate)
+                except Exception:  # noqa: BLE001 — telemetry only
+                    logger.debug("Could not capture eToro fill prices")
+
         return orders
 
 

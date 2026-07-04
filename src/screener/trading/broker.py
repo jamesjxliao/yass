@@ -16,6 +16,16 @@ class RebalanceOrder:
     notional: float  # dollar amount
     status: str = "pending"
     trim: bool = False  # True = partial sell (reduce to target), False = full exit
+    # Execution-quality instrumentation (populated live by each broker's
+    # execute_orders; None on dry runs and until a fill lands). `arrival_price`
+    # is the reference/market price captured at order-placement time;
+    # `fill_price` is the broker's actual average execution price. The
+    # live-vs-backtest tracker (evaluation/tracking.py) uses them to split its
+    # per-period gap into timing drift (arrival vs the model's close) and
+    # execution slippage/spread (fill vs arrival) — the one real-money leak the
+    # backtest structurally cannot see.
+    arrival_price: float | None = None
+    fill_price: float | None = None
 
 
 TOLERANCE = 0.05

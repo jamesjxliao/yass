@@ -44,6 +44,7 @@ class LogRecord:
     executed: bool
     file: str
     note: str = ""
+    orders: list = field(default_factory=list)  # raw order dicts (for exec-cost decomposition)
 
 
 @dataclass
@@ -139,10 +140,12 @@ def parse_trade_log(path: Path) -> LogRecord | None:
         log_date = date.fromisoformat(d["date"])
     except (KeyError, ValueError):
         log_date = ts.date()
+    raw_orders = d.get("orders")
+    orders = [o for o in raw_orders if isinstance(o, dict)] if isinstance(raw_orders, list) else []
     return LogRecord(
         broker=broker, ts=ts, log_date=log_date, equity=_equity_of(d),
         holdings=_holdings_of(d), executed=_executed_of(d), file=path.name,
-        note=str(d.get("note", ""))[:200],
+        note=str(d.get("note", ""))[:200], orders=orders,
     )
 
 
@@ -247,6 +250,70 @@ def build_periods(events: dict[str, list[LogRecord]],
     return periods
 
 
+def _close_on_or_after(prices: pl.DataFrame, ticker: str, d: date) -> float | None:
+    """The model's entry price: first close on/after ``d`` (runner convention)."""
+    px = (prices.filter((pl.col("ticker") == ticker) & (pl.col("date") >= d))
+          .sort("date"))
+    return float(px["close"][0]) if not px.is_empty() else None
+
+
+def execution_decomposition(events: dict[str, list[LogRecord]],
+                            prices: pl.DataFrame) -> list[dict]:
+    """Per executed rebalance, decompose the transaction cost the equity-gap
+    can't attribute, using the per-order ``fill_price``/``arrival_price`` logged
+    live. Cost is oriented so positive = transacted WORSE than the model close
+    (paid more on a buy / received less on a sell).
+
+      total   = fill      vs model close  (spread + timing; needs fill only)
+      timing  = arrival   vs model close  (needs arrival_price too)
+      slippage= fill       vs arrival     (pure execution; needs arrival too)
+
+    Aggregated dollar-weighted to bp of traded notional and bp of book equity
+    (book bp is what maps onto the period gap). Only orders that actually carry a
+    fill contribute — pre-instrumentation logs yield an empty list.
+    """
+    out: list[dict] = []
+    for broker, seq in events.items():
+        for a in seq:
+            rebal = a.ts.date()
+            book = a.equity or 0.0
+            tot = tim = slip = tot_notional = 0.0
+            n = 0
+            has_arrival = False
+            for o in a.orders:
+                fill = o.get("fill_price")
+                notional = o.get("notional")
+                if not isinstance(fill, (int, float)) or not isinstance(notional, (int, float)):
+                    continue
+                if fill <= 0 or notional <= 0:
+                    continue
+                mc = _close_on_or_after(prices, o.get("ticker", ""), rebal)
+                if mc is None or mc <= 0:
+                    continue
+                buy = o.get("side") == "buy"
+                tot += notional * ((fill - mc) / mc if buy else (mc - fill) / mc)
+                tot_notional += notional
+                n += 1
+                arr = o.get("arrival_price")
+                if isinstance(arr, (int, float)) and arr > 0:
+                    has_arrival = True
+                    slip += notional * ((fill - arr) / arr if buy else (arr - fill) / arr)
+                    tim += notional * ((arr - mc) / mc if buy else (mc - arr) / mc)
+            if n == 0:
+                continue
+            out.append({
+                "broker": broker, "date": str(rebal), "n_fills": n,
+                "traded_notional": tot_notional,
+                "exec_cost_bp_traded": 10000 * tot / tot_notional if tot_notional else None,
+                "exec_cost_bp_book": 10000 * tot / book if book else None,
+                "timing_bp_traded": (10000 * tim / tot_notional
+                                     if has_arrival and tot_notional else None),
+                "slippage_bp_traded": (10000 * slip / tot_notional
+                                       if has_arrival and tot_notional else None),
+            })
+    return out
+
+
 def load_or_seed_ledger(recs: list[LogRecord], ledger_path: Path,
                         reseed: bool = False) -> list[CashFlow]:
     """Load the user-editable cash-flow ledger; seed it with detected
@@ -327,6 +394,26 @@ def report(db_path: str, trade_dir: Path, track_dir: Path,
         rows.append({"broker": broker, "cumulative": True,
                      "model": cum_m - 1, "realized": cum_r - 1,
                      "spy": cum_s - 1})
+
+    decomp = execution_decomposition(events, prices)
+    if decomp:
+        def _bp(x):
+            return f"{x:+.0f}" if x is not None else "n/a"
+        print("\n=== execution quality: transaction cost vs model close "
+              "(+bp = transacted worse) ===")
+        print(f"{'broker':<14}{'date':<12}{'fills':>6}{'traded$':>12}"
+              f"{'cost bp/trade':>14}{'bp/book':>9}{'timing':>8}{'slip':>7}")
+        for r in decomp:
+            print(f"{r['broker']:<14}{r['date']:<12}{r['n_fills']:>6}"
+                  f"{r['traded_notional']:>12,.0f}"
+                  f"{_bp(r['exec_cost_bp_traded']):>14}{_bp(r['exec_cost_bp_book']):>9}"
+                  f"{_bp(r['timing_bp_traded']):>8}{_bp(r['slippage_bp_traded']):>7}")
+        print("  timing = arrival vs model close; slip = fill vs arrival "
+              "(n/a where arrival not instrumented, e.g. eToro / pre-instrumentation logs)")
+        rows.append({"execution_decomposition": decomp})
+    else:
+        print("\n[exec] no filled orders carry price instrumentation yet — "
+              "arrival/fill logging accrues from the next live rebalance.")
 
     track_dir.mkdir(parents=True, exist_ok=True)
     out = track_dir / "tracking_report.json"
