@@ -90,6 +90,67 @@ def test_guardrails_validate_results():
     cache.close()
 
 
+def test_loop_threads_production_backtest_knobs(cache: CacheManager, tmp_path, monkeypatch):
+    """Regression: ResearchLoop must measure every variation under the base
+    config's production knobs (hold_bonus, weighting, max_per_sector), not
+    run_backtest's defaults (hold_bonus=0.0, weighting='equal', no sector cap).
+    Otherwise `run-research` gates candidates on numbers that aren't comparable
+    to the production baseline."""
+    from datetime import date
+
+    from screener.research import loop as loop_mod
+    from screener.research.experiment import (
+        ExperimentConfig,
+        ExperimentGuardrails,
+        ExperimentVariation,
+    )
+    from screener.research.loop import ResearchLoop
+
+    cfg = tmp_path / "base.yaml"
+    cfg.write_text(
+        "universe: sp500\ntop_n: 10\nhold_bonus: 1.0\n"
+        "weighting: inverse_vol\nmax_per_sector: 3\nfilters: []\n"
+        "signals:\n  - name: quality_score\n    weight: 1.0\n"
+    )
+
+    captured: list[dict] = []
+
+    def fake_run_backtest(**kwargs):
+        captured.append(kwargs)
+        return BacktestMetrics(
+            sharpe_ratio=1.0, max_drawdown=-0.1, cagr=0.1, calmar_ratio=1.0,
+            sample_size=50, psr=0.9, walk_forward_consistency=0.8, total_return=0.3,
+        )
+
+    monkeypatch.setattr(loop_mod, "run_backtest", fake_run_backtest)
+
+    exp = ExperimentConfig(
+        name="thread_test",
+        hypothesis="",
+        base_config=str(cfg),
+        variations=[ExperimentVariation(
+            name="v1", signals=[{"name": "quality_score", "weight": 1.0}])],
+        backtest_start=date(2020, 1, 1),
+        backtest_end=date(2020, 12, 31),
+        rebalance_frequency="monthly",
+        top_n=10,
+        guardrails=ExperimentGuardrails(
+            holdout_start=date(2020, 7, 1), max_experiments=50,
+            min_sharpe_threshold=0.0, min_sample_size=1),
+    )
+
+    loop = ResearchLoop(cache, pit_server=None, price_data=None,
+                        filters_dir=Path("filters"), signals_dir=Path("signals"))
+    loop.run(exp)
+
+    assert captured, "run_backtest was never called"
+    for call in captured:  # train + holdout both must carry the knobs
+        assert call["hold_bonus"] == 1.0
+        assert call["weighting"] == "inverse_vol"
+        assert call["frequency"] == "monthly"
+        assert call["pipeline"].max_per_sector == 3
+
+
 def test_experiment_config_parsing():
     from screener.research.experiment import ExperimentConfig
 

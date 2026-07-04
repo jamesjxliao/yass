@@ -278,8 +278,8 @@ def execution_decomposition(events: dict[str, list[LogRecord]],
             rebal = a.ts.date()
             book = a.equity or 0.0
             tot = tim = slip = tot_notional = 0.0
+            arrival_notional = 0.0  # notional of ONLY the arrival-instrumented fills
             n = 0
-            has_arrival = False
             for o in a.orders:
                 fill = o.get("fill_price")
                 notional = o.get("notional")
@@ -296,7 +296,7 @@ def execution_decomposition(events: dict[str, list[LogRecord]],
                 n += 1
                 arr = o.get("arrival_price")
                 if isinstance(arr, (int, float)) and arr > 0:
-                    has_arrival = True
+                    arrival_notional += notional
                     slip += notional * ((fill - arr) / arr if buy else (arr - fill) / arr)
                     tim += notional * ((arr - mc) / mc if buy else (mc - arr) / mc)
             if n == 0:
@@ -306,10 +306,16 @@ def execution_decomposition(events: dict[str, list[LogRecord]],
                 "traded_notional": tot_notional,
                 "exec_cost_bp_traded": 10000 * tot / tot_notional if tot_notional else None,
                 "exec_cost_bp_book": 10000 * tot / book if book else None,
-                "timing_bp_traded": (10000 * tim / tot_notional
-                                     if has_arrival and tot_notional else None),
-                "slippage_bp_traded": (10000 * slip / tot_notional
-                                       if has_arrival and tot_notional else None),
+                # Divide the timing/slippage numerators by the notional they were
+                # summed over (arrival-instrumented fills only) — NOT tot_notional,
+                # which also counts fills missing an arrival price and would dilute
+                # the split whenever a rebalance mixes instrumented and
+                # uninstrumented fills (e.g. a transient quote failure leaves one
+                # order with no arrival_price).
+                "timing_bp_traded": (10000 * tim / arrival_notional
+                                     if arrival_notional else None),
+                "slippage_bp_traded": (10000 * slip / arrival_notional
+                                       if arrival_notional else None),
             })
     return out
 

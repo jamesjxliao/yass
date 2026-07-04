@@ -189,3 +189,23 @@ def test_execution_decomposition_ignores_uninstrumented_orders():
     rec = _rec_with_orders([
         {"ticker": "AAPL", "side": "buy", "notional": 1000.0, "status": "submitted"}])
     assert execution_decomposition({"alpaca_paper": [rec]}, _close_frame([("AAPL", 100.0)])) == []
+
+
+def test_execution_decomposition_mixed_arrival_scales_by_arrival_notional():
+    # Two $1,000 buys, only the first arrival-instrumented (the second lost its
+    # quote — e.g. Alpaca _get_last_price returned None). The timing/slippage
+    # split must be scaled by the ARRIVAL notional ($1,000), NOT the full traded
+    # notional ($2,000) — dividing by the full notional halves (dilutes) the split
+    # and it no longer reconciles with the total exec cost.
+    rec = _rec_with_orders([
+        {"ticker": "AAPL", "side": "buy", "notional": 1000.0,
+         "arrival_price": 100.5, "fill_price": 101.0},
+        {"ticker": "MSFT", "side": "buy", "notional": 1000.0, "fill_price": 101.0},
+    ])
+    [row] = execution_decomposition(
+        {"alpaca_paper": [rec]}, _close_frame([("AAPL", 100.0), ("MSFT", 100.0)]))
+    assert row["n_fills"] == 2
+    assert row["exec_cost_bp_traded"] == pytest.approx(100.0, abs=0.5)  # both fills, /2000
+    # arrival-only notional in the denominator -> not diluted by the MSFT fill
+    assert row["timing_bp_traded"] == pytest.approx(50.0, abs=0.5)
+    assert row["slippage_bp_traded"] == pytest.approx(49.75, abs=0.5)

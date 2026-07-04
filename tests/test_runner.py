@@ -111,6 +111,23 @@ def test_benchmark_period_returns_uses_rebalance_intervals():
     assert all(x == pytest.approx(0.10) for x in r)
 
 
+def test_benchmark_period_returns_uses_first_close_on_or_after_boundary():
+    # When a rebalance date has no close ON that day (weekend/holiday), the
+    # benchmark must price it at the FIRST close ON/AFTER — the same convention
+    # the strategy uses for its own boundaries — not the last close on/before
+    # (which would phase the benchmark 1-3 days early and bias the CAPM/IR fit).
+    # No close on 2020-02-01; 105 sits just before it, 110 just after.
+    prices = pl.DataFrame({
+        "date": [date(2020, 1, 1), date(2020, 1, 29), date(2020, 2, 3),
+                 date(2020, 3, 1), date(2020, 4, 1)],
+        "close": [100.0, 105.0, 110.0, 120.0, 130.0],
+    })
+    r = benchmark_period_returns(prices, date(2020, 1, 1), date(2020, 4, 1), "monthly")
+    assert len(r) == 3
+    # Period 0 boundary at 2020-02-01 -> first close on/after = 110 (not 105).
+    assert r[0] == pytest.approx(110.0 / 100.0 - 1)   # 0.10, would be 0.05 under old convention
+
+
 def test_benchmark_period_returns_empty_frame():
     empty = pl.DataFrame({"date": [], "close": []})
     assert benchmark_period_returns(empty, date(2020, 1, 1), date(2020, 4, 1)) == []

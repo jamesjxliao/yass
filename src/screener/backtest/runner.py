@@ -71,8 +71,13 @@ def benchmark_period_returns(
     rebal = _generate_rebalance_dates(start, end, frequency)
     closes: list[float | None] = []
     for d in rebal:
-        sub = bp.filter(pl.col("date") <= d)  # last close on or before the rebalance date
-        closes.append(float(sub["close"][-1]) if len(sub) else None)
+        # First close ON/AFTER the rebalance date — the SAME convention the
+        # strategy uses for its own boundaries (see run_backtest: start/boundary
+        # prices are `date >= rebal`). Last-close-on/before would phase the
+        # benchmark 1-3 days earlier whenever the rebalance date is a weekend/
+        # holiday, biasing the regressed CAPM beta/alpha/IR the two series feed.
+        sub = bp.filter(pl.col("date") >= d)
+        closes.append(float(sub["close"][0]) if len(sub) else None)
     return [
         (closes[i + 1] / closes[i] - 1) if (closes[i] and closes[i + 1]) else 0.0
         for i in range(len(closes) - 1)

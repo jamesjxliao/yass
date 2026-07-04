@@ -34,6 +34,19 @@ def test_401_raises_fmpautherror_not_swallowed():
         p.get_key_metrics("AAPL")
 
 
+def test_get_fundamentals_401_propagates():
+    """The whole-universe fundamentals fetch is the path that matters most: its
+    broad `except Exception` must let FMPAuthError through (a dead key fails the
+    run loudly) instead of degrading every ticker to an empty DataFrame."""
+    p = FMPProvider(api_key="dead")
+    p._client = MagicMock()
+    p._client.get.return_value = httpx.Response(
+        401, request=httpx.Request("GET", "https://example.test")
+    )
+    with pytest.raises(FMPAuthError):
+        p.get_fundamentals(["AAPL"])
+
+
 def test_401_does_not_retry():
     """A rejected key is not a transient error — don't waste retries on it."""
     p = FMPProvider(api_key="dead")

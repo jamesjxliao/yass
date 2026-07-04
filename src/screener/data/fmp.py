@@ -98,7 +98,14 @@ class FMPProvider:
             except (httpx.HTTPError, httpx.HTTPStatusError) as e:
                 if attempt < retries:
                     wait = 2 ** attempt
-                    logger.debug("Retry %d/%d for %s: %s", attempt + 1, retries, endpoint, e)
+                    # NEVER log str(e): httpx.HTTPStatusError embeds the full
+                    # request URL, including the ?apikey=<KEY> query param. Log the
+                    # exception TYPE (and status code if any) only.
+                    status = getattr(getattr(e, "response", None), "status_code", None)
+                    logger.debug(
+                        "Retry %d/%d for %s: %s%s", attempt + 1, retries, endpoint,
+                        type(e).__name__, f" (HTTP {status})" if status else "",
+                    )
                     time.sleep(wait)
                 else:
                     raise
@@ -294,6 +301,11 @@ class FMPProvider:
                 else:
                     continue
                 rows.append(self.enrich_profile_row(row, ticker))
+            except FMPAuthError:
+                # A rejected/cancelled key is NOT a per-ticker hiccup — it fails
+                # the WHOLE universe. Propagate loudly (the guard's whole purpose)
+                # instead of being swallowed into empty fundamentals.
+                raise
             except Exception:
                 # Broad: a malformed record (e.g. null EPS) must skip the one
                 # ticker, not abort the whole batch (monthly screen/trade).
@@ -497,6 +509,10 @@ class CachedFMPProvider:
                     else:
                         return None
                     return self._fmp.enrich_profile_row(row, ticker)
+                except FMPAuthError:
+                    # Rejected key fails the whole universe — propagate loudly
+                    # rather than degrade to one more "failed" ticker.
+                    raise
                 except Exception:
                     # Broad: one malformed record must not abort the whole batch.
                     logger.warning("Failed to fetch fundamentals for %s", ticker)

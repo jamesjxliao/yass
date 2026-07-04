@@ -108,6 +108,20 @@ class ResearchLoop:
         # Load base config for default filters
         base_config = PipelineConfig.from_yaml(Path(experiment.base_config))
 
+        # Thread the base config's production backtest knobs (hold_bonus,
+        # weighting, position_stop_loss, and — via the pipeline below —
+        # max_per_sector) into every variation's backtest. Without this, both the
+        # train and holdout run_backtest calls silently fall back to
+        # run_backtest's defaults (hold_bonus=0.0, weighting="equal", no sector
+        # cap), so `run-research` would measure candidates under a different
+        # portfolio than production and apply the accept/reject gate to numbers
+        # that aren't comparable to the baseline. The experiment's own
+        # rebalance_frequency still wins over the config's.
+        bt_kwargs = {
+            **base_config.backtest_kwargs(),
+            "frequency": experiment.rebalance_frequency,
+        }
+
         results: list[VariationResult] = []
 
         for var_idx, variation in enumerate(experiment.variations):
@@ -138,6 +152,7 @@ class ResearchLoop:
                 filters=filters,
                 signals_with_weights=signals_with_weights,
                 top_n=experiment.top_n,
+                max_per_sector=base_config.max_per_sector,
             )
 
             # Run backtest (train period only, not holdout)
@@ -148,7 +163,7 @@ class ResearchLoop:
                 universe_index=self._universe_index,
                 start_date=experiment.backtest_start,
                 end_date=experiment.guardrails.holdout_start,
-                frequency=experiment.rebalance_frequency,
+                **bt_kwargs,
             )
 
             warnings = self._guardrails.validate_results(
@@ -198,6 +213,7 @@ class ResearchLoop:
                     filters=filters,
                     signals_with_weights=signals_with_weights,
                     top_n=experiment.top_n,
+                    max_per_sector=base_config.max_per_sector,
                 )
                 holdout_metrics = run_backtest(
                     pipeline=pipeline,
@@ -206,7 +222,7 @@ class ResearchLoop:
                     universe_index=self._universe_index,
                     start_date=experiment.guardrails.holdout_start,
                     end_date=experiment.backtest_end,
-                    frequency=experiment.rebalance_frequency,
+                    **bt_kwargs,
                 )
 
                 self._guardrails.log_experiment(

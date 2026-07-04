@@ -16,9 +16,14 @@ class PITQuery:
     def get_as_of(self, ticker: str, field: str, as_of_date: date) -> float | None:
         """Return the value of a field for a ticker as it was known on as_of_date."""
         result = self._cache.to_polars(
+            # Latest fiscal PERIOD first (report_date), then latest FILING of that
+            # period (observed_at) so a late amendment of an OLDER quarter — whose
+            # observed_at can postdate a NEWER quarter's original filing — never
+            # shadows the newer quarter. The observed_at <= as_of cutoff still runs
+            # first, so ordering by report_date can't leak a not-yet-filed period.
             """SELECT value FROM pit_snapshots
                WHERE ticker = ? AND field = ? AND observed_at <= ?
-               ORDER BY observed_at DESC, report_date DESC LIMIT 1""",
+               ORDER BY report_date DESC, observed_at DESC LIMIT 1""",
             [ticker, field, as_of_date.isoformat()],
         )
         if result.is_empty():
@@ -40,10 +45,13 @@ class PITQuery:
 
         # Single query: get the latest value per (ticker, field) where observed_at <= as_of_date
         raw = self._cache.to_polars(
+            # ORDER BY report_date DESC, observed_at DESC: latest fiscal period
+            # first, then latest filing of that period (see get_as_of) — a late
+            # amendment of an older quarter must not shadow a newer quarter.
             """SELECT ticker, field, value,
                       ROW_NUMBER() OVER (
                           PARTITION BY ticker, field
-                          ORDER BY observed_at DESC, report_date DESC
+                          ORDER BY report_date DESC, observed_at DESC
                       ) AS rn
                FROM pit_snapshots
                WHERE ticker IN (SELECT UNNEST(?::VARCHAR[]))
