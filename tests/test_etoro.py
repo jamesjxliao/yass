@@ -349,6 +349,9 @@ class TestExecuteOrdersStopLoss:
             [],
             [EtoroPosition(position_id=1, instrument_id=1129, ticker="AAPL",
                            amount=1000, units=5.0, open_rate=200.0, pnl=0)],
+            # third read: the post-confirm fill-price capture (open_rate)
+            [EtoroPosition(position_id=1, instrument_id=1129, ticker="AAPL",
+                           amount=1000, units=5.0, open_rate=200.0, pnl=0)],
         ])
         broker._get_rate = MagicMock(return_value=150.0)
         broker._open_position = MagicMock(return_value={"orderForOpen": {}})
@@ -373,6 +376,9 @@ class TestExecuteOrdersStopLoss:
         broker.cancel_open_orders = MagicMock(return_value=0)
         broker.get_positions_detailed = MagicMock(side_effect=[
             [],
+            [EtoroPosition(position_id=1, instrument_id=1129, ticker="AAPL",
+                           amount=1000, units=5.0, open_rate=200.0, pnl=0)],
+            # third read: the post-confirm fill-price capture (open_rate)
             [EtoroPosition(position_id=1, instrument_id=1129, ticker="AAPL",
                            amount=1000, units=5.0, open_rate=200.0, pnl=0)],
         ])
@@ -505,10 +511,16 @@ class TestExecuteOrdersUnclearedBuy:
         broker = self._make_broker()
         new_pos = EtoroPosition(position_id=9, instrument_id=2222, ticker="NEW",
                                 amount=5000, units=10.0, open_rate=500.0, pnl=0)
-        broker.get_positions_detailed = MagicMock(side_effect=[[], [new_pos]])
+        # reads: phase-1 (empty), buy-verify (present), fill-capture (open_rate)
+        broker.get_positions_detailed = MagicMock(side_effect=[[], [new_pos], [new_pos]])
         orders = [RebalanceOrder(ticker="NEW", side="buy", notional=5000)]
         result = broker.execute_orders(orders, dry_run=False)
         assert result[0].status == "submitted"
+        # fill_price captured from the freshly-opened position's open_rate; arrival
+        # is intentionally not instrumented for eToro (fill-vs-model-close isolates
+        # the spread on its own).
+        assert result[0].fill_price == 500.0
+        assert result[0].arrival_price is None
 
 
 class TestInstrumentCacheCollision:
