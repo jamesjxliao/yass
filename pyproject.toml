@@ -51,10 +51,9 @@ omit = [
 ]
 
 [tool.coverage.report]
-# Deterministic coverage gate over core logic (currently ~61%). Set a little
-# below current as a ratchet that catches gross regressions without being brittle
-# (also absorbs the public-repo difference, which lacks the experimental hedge
-# model). Raise as coverage improves; never lower without reason.
+# Deterministic coverage gate over core logic. Set a little below current as a
+# ratchet that catches gross regressions without being brittle. Raise as
+# coverage improves; never lower without reason.
 fail_under = 58
 skip_covered = false
 exclude_lines = ["pragma: no cover", "if __name__ == .__main__.:", "raise NotImplementedError"]
@@ -69,7 +68,6 @@ select = ["E", "F", "I", "N", "W"]
 [tool.ruff.lint.per-file-ignores]
 "src/screener/evaluation/report.py" = ["N803", "N806"]
 "tests/test_evaluation.py" = ["N806"]
-# ML/math conventions (X, y, T) and verbose log/print lines in the research model
 # research harnesses: compact guard lines (append/reset/continue) in rebalance loops
 
 [tool.pytest.ini_options]

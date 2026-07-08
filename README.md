@@ -80,7 +80,6 @@ The repo ships with 8 signals — use them as-is or adjust weights in `config/ex
 | `low_leverage_growth` | Growth funded by cash flow, not debt |
 | `quality_score` | Composite quality: ROE, ROIC, ROA, R&D efficiency, low debt |
 | `margin_expansion` | Gross + operating margin improvement YoY |
-| `quality_at_discount` | Beaten-down quality stocks with FCF + low debt |
 | `quality_midcap` | Mid-cap quality + value blend: ROE, ROIC, ROA, low debt, earnings yield |
 | `quality_at_discount_midcap` | Mid-cap variant of quality-at-discount |
 
