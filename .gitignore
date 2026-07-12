@@ -53,3 +53,9 @@ data/insider_sf2/
 data/sf3a/
 # HF earnings-call transcripts (MIT) + derived metrics — too large for git
 data/transcripts/
+
+# Sharadar EVENTS raw rows: licensed, local-only (regenerable via events_study.py fetch)
+data/events/*
+
+# JKP factor library downloads (CC BY-NC 4.0, regenerable via jkp_mega_scan.py fetch)
+data/jkp_mega/*
