@@ -157,6 +157,6 @@ def test_experiment_config_parsing():
     config = ExperimentConfig.from_json(
         Path(__file__).parent.parent / "config" / "experiments" / "example_experiment.json"
     )
-    assert config.name == "momentum_value_blend_v1"
+    assert config.name == "momentum_quality_blend_v1"
     assert len(config.variations) == 2
     assert config.guardrails.max_experiments == 50
