@@ -71,7 +71,7 @@ No API key? No problem — the screener falls back to mock data so you can explo
 
 ## Included Signals
 
-The repo ships with 8 signals — use them as-is or adjust weights in `config/example.yaml`:
+The repo ships with 7 signals — use them as-is or adjust weights in `config/example.yaml`:
 
 | Signal | What It Captures |
 |---|---|
