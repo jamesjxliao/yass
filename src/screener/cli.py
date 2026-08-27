@@ -641,12 +641,13 @@ def evaluate(
     start = date.fromisoformat(start_date)
     end = date.fromisoformat(end_date)
     tickers = _backtest_universe(cache, provider, pipeline_config.universe)
-    price_data = cache.get_prices(tickers, str(start - timedelta(days=400)), str(end))
+    # Fetch through the provider (not cache.get_prices) so a cold cache — or the
+    # mock provider, which never writes to the cache — still yields price data.
+    price_data = provider.get_prices(tickers, start - timedelta(days=400), end)
 
-    # SPY for the CAPM alpha/beta section (fetched up front so it's cached for the
-    # benchmark charts below too). Aligned to rebalance dates inside the report.
-    provider.get_prices(["SPY"], start - timedelta(days=10), end)
-    spy_prices = cache.get_prices(["SPY"], str(start - timedelta(days=10)), str(end))
+    # SPY for the CAPM alpha/beta section. Aligned to rebalance dates inside the
+    # report.
+    spy_prices = provider.get_prices(["SPY"], start - timedelta(days=10), end)
 
     report = run_full_evaluation(
         pipeline=pipeline,

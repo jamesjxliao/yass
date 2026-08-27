@@ -76,7 +76,10 @@ class CorrelationResult:
         for s1 in signals:
             row = f"{s1:>20}"
             for s2 in signals:
-                row += f"{self.matrix[s1][s2]:>15.3f}"
+                corr = self.matrix[s1].get(s2)
+                # A pair is absent when a signal produced no usable values on
+                # any sample date (e.g. all-null inputs) — report it, don't crash.
+                row += f"{corr:>15.3f}" if corr is not None else f"{'n/a':>15}"
             lines.append(row)
         if self.high_correlation_pairs:
             lines.append("\nWARNING: Highly correlated pairs (>0.7):")
