@@ -23,18 +23,56 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def detect_splits(prices: pl.DataFrame) -> list[str]:
-    """Return tickers with day-over-day close changes > 40%, indicating stale split data."""
+def _seams(prices: pl.DataFrame) -> pl.DataFrame:
+    """Rows whose close moved > 40% vs the prior cached day: ticker, prev_date, date."""
     if prices.is_empty():
-        return []
-    sorted_p = prices.sort(["ticker", "date"])
-    with_ratio = sorted_p.with_columns(
-        (pl.col("close") / pl.col("close").shift(1).over("ticker")).alias("_ratio")
+        return pl.DataFrame(schema={"ticker": pl.String, "prev_date": pl.Date,
+                                    "date": pl.Date})
+    with_ratio = prices.sort(["ticker", "date"]).with_columns(
+        (pl.col("close") / pl.col("close").shift(1).over("ticker")).alias("_ratio"),
+        pl.col("date").shift(1).over("ticker").alias("prev_date"),
     )
-    suspect = with_ratio.filter(
-        (pl.col("_ratio") < 0.6) | (pl.col("_ratio") > 1.67)
-    )
-    return suspect["ticker"].unique().to_list()
+    return with_ratio.filter(
+        _is_seam(pl.col("_ratio"))
+    ).select("ticker", "prev_date", "date")
+
+
+_LO, _HI = 0.6, 1.67  # > 40% day-over-day move either way
+
+
+def _is_seam(ratio):
+    return (ratio < _LO) | (ratio > _HI)
+
+
+def detect_splits(prices: pl.DataFrame) -> list[str]:
+    """Return tickers with day-over-day close changes > 40% (candidate stale splits).
+
+    Candidates only: a genuine crash/squeeze or a spin-off (SEP ``close`` is not
+    spin-off-adjusted) produces the same seam — ``heal_split_prices`` tells them
+    apart with a probe re-fetch before rewriting anything.
+    """
+    return _seams(prices)["ticker"].unique().to_list()
+
+
+def _seam_is_genuine(
+    ticker: str, seam_rows: pl.DataFrame,
+    fetch_single: Callable[[str, date, date], pl.DataFrame],
+) -> bool | None:
+    """Probe-fetch each seam's two days. True = the provider's CURRENT data shows
+    the same jump (a real move / spin-off, nothing stale); False = the jump is
+    gone in fresh data (stale split adjustment); None = probe inconclusive (empty
+    or missing a day) — the caller then falls back to the full re-fetch."""
+    for prev_d, d in seam_rows.select("prev_date", "date").iter_rows():
+        probe = fetch_single(ticker, prev_d, d)
+        if probe.is_empty():
+            return None
+        closes = dict(zip(probe["date"].to_list(), probe["close"].to_list()))
+        c0, c1 = closes.get(prev_d), closes.get(d)
+        if not c0 or not c1:
+            return None
+        if not _is_seam(c1 / c0):
+            return False
+    return True
 
 
 def heal_split_prices(
@@ -53,14 +91,22 @@ def heal_split_prices(
     ``fetch_single(ticker, start, end)`` is the provider's raw single-ticker
     price fetch; ``source`` tags the re-stored rows.
     """
-    split_tickers = detect_splits(result)
-    if not split_tickers:
+    seams = _seams(result)
+    if seams.is_empty():
         return result
-    logger.info(
-        "Split detected for %s — re-fetching adjusted prices",
-        ", ".join(split_tickers),
-    )
-    for ticker in split_tickers:
+    healed_any = False
+    for ticker in seams["ticker"].unique().to_list():
+        # Cheap probe first. Without it every GENUINE >40% move (CAR's 2026
+        # squeeze, MRNA +177%, bank failures) and every spin-off seam re-fetched
+        # the ticker's full multi-year history and rewrote it on EVERY cached
+        # read covering the seam — forever, since fresh data keeps the same seam.
+        genuine = _seam_is_genuine(
+            ticker, seams.filter(pl.col("ticker") == ticker), fetch_single
+        )
+        if genuine:
+            continue
+        logger.info("Split detected for %s — re-fetching adjusted prices", ticker)
+        healed_any = True
         # Re-fetch the FULL cached span, not just this call's window —
         # invalidate_prices deletes ALL rows for the ticker, so a window-
         # only re-fetch would truncate (e.g.) 10yr of history to ~400 days
@@ -82,4 +128,4 @@ def heal_split_prices(
                 "Split re-fetch for %s returned no data — keeping "
                 "existing cache", ticker,
             )
-    return cache.get_prices(tickers, str(start), str(end))
+    return cache.get_prices(tickers, str(start), str(end)) if healed_any else result

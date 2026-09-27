@@ -300,6 +300,35 @@ def test_get_prices_split_heals_full_cached_span():
     cache.close()
 
 
+def test_get_prices_genuine_seam_is_not_rewritten():
+    """A >40% move that the provider's CURRENT data also shows (a real crash or a
+    spin-off — SEP close is not spin-off-adjusted) is not a stale split: only a
+    two-day probe is fetched, never the full span, and the cache is untouched."""
+    cache = CacheManager(":memory:")
+    api = SharadarProvider(api_key="k")
+    series = _weekday_prices("HON", date(2024, 1, 1), 40,
+                             lambda i: 460.0 if i < 20 else 228.0)  # spin-off day
+    cache.store_prices(series, source="sharadar")
+    days = series["date"].to_list()
+
+    calls = []
+
+    def fake_prices(tickers, start, end):
+        calls.append((start, end))
+        return series.filter((pl.col("date") >= start) & (pl.col("date") <= end))
+
+    api.get_prices = fake_prices
+    prov = CachedSharadarProvider(api, cache)
+    cache.invalidate_prices = MagicMock(wraps=cache.invalidate_prices)
+
+    result = prov.get_prices(["HON"], days[0], days[-1])
+
+    assert calls == [(days[19], days[20])]  # the probe only
+    cache.invalidate_prices.assert_not_called()
+    assert result.sort("date")["close"].to_list() == series["close"].to_list()
+    cache.close()
+
+
 def test_get_prices_split_refetch_failure_preserves_history():
     """A split-triggered re-fetch that returns empty (transient API failure)
     must NOT wipe the ticker's existing cached history (mirrors the FMP test)."""

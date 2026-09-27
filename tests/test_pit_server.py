@@ -106,3 +106,17 @@ def test_avg_volume_is_not_single_day(cache: CacheManager):
     # Should be an average, not the last day's volume
     last_day_vol = max(r["volume"] for r in rows if r["date"].weekday() < 5)
     assert vol != last_day_vol, "avg_volume_20d should be averaged, not single-day"
+
+
+def test_same_day_filing_not_served_on_rebalance_day(cache: CacheManager):
+    """observed_at is a filing DATE (often after the close); the backtest trades
+    at the rebalance day's close, so a filing dated the rebalance day itself must
+    not be served until the next day."""
+    cache.record_pit_snapshot("AAPL", "roe", 0.10, "2024-03-31", "test", "2024-05-02")
+    cache.record_pit_snapshot("AAPL", "roe", 0.30, "2024-06-30", "test", "2024-08-01")
+    pit = PITDataServer(MagicMock(), cache, MagicMock())
+
+    on_day = pit.get_screening_data(["AAPL"], datetime.date(2024, 8, 1))
+    assert on_day["roe"][0] == 0.10
+    next_day = pit.get_screening_data(["AAPL"], datetime.date(2024, 8, 2))
+    assert next_day["roe"][0] == 0.30

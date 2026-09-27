@@ -108,10 +108,12 @@ class CacheManager:
         data = fetch_fn()
         expires_at = datetime.now(UTC) + timedelta(hours=ttl_hours)
         self._conn.execute(
+            # fetched_at set explicitly: on a REPLACE of an existing key the
+            # column default does not fire, so fetched_at froze at the first fetch.
             """INSERT OR REPLACE INTO api_cache
-               (cache_key, provider, endpoint, expires_at, data_json)
-               VALUES (?, ?, ?, ?, ?)""",
-            [key, provider, endpoint, expires_at, json.dumps(data)],
+               (cache_key, provider, endpoint, fetched_at, expires_at, data_json)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            [key, provider, endpoint, datetime.now(UTC), expires_at, json.dumps(data)],
         )
         return data
 

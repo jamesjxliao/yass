@@ -151,8 +151,13 @@ class PITDataServer:
         Merges PIT fundamental snapshots with latest price data from cache.
         """
         if self._check_pit_data():
+            # Filings observed strictly BEFORE the rebalance day. observed_at is
+            # the SEC filing DATE (Sharadar datekey) and many filings land after
+            # the close, while the backtest enters at that day's close and the
+            # live rebalance runs intraday — so a same-day filing is not yet
+            # knowable. Matches the price cutoff (`date < as_of`) below.
             df = self._pit.get_fundamentals_as_of(
-                tickers, PIT_FIELDS, as_of_date
+                tickers, PIT_FIELDS, as_of_date - timedelta(days=1)
             )
             if not df.is_empty() and len(df.columns) > 1:
                 # Drop stale close/volume from PIT fundamentals before joining

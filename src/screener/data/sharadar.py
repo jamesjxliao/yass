@@ -341,8 +341,14 @@ class CachedSharadarProvider:
     """
 
     _CACHE_VERSION = 1
-    PROFILE_TTL_HOURS = 7 * 24
-    UNIVERSE_TTL_HOURS = 30 * 24
+    # Short TTLs (FMP's 7d/30d were sized for its ~7-calls-per-ticker cost; a full
+    # Sharadar universe refresh is ~30 batched calls). The backtest sees a filing
+    # on its datekey and an index change on its effective date; with 7d/30d the
+    # live screen lagged both by up to a week/month (KR's Sep-18-2026 10-Q stayed
+    # invisible to the live screen until Sep 24). 24h < the 48h db-refresh cadence,
+    # so every CI run and every rebalance session re-reads current data.
+    PROFILE_TTL_HOURS = 24
+    UNIVERSE_TTL_HOURS = 24
 
     def __init__(self, sharadar: SharadarProvider, cache: CacheManager):
         self._api = sharadar

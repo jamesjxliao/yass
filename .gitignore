@@ -59,3 +59,5 @@ data/events/*
 
 # JKP factor library downloads (CC BY-NC 4.0, regenerable via jkp_mega_scan.py fetch)
 data/jkp_mega/*
+# Spin-off events/factors: derived from licensed Sharadar rows — local-only
+data/spinoffs/

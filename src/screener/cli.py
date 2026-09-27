@@ -280,7 +280,10 @@ def _run_rebalance(
 @app.command()
 def screen(
     config: Annotated[Path, typer.Option(help="Config YAML")] = Path("config/default.yaml"),
-    top_n: Annotated[int, typer.Option(help="Number of top candidates")] = 20,
+    top_n: Annotated[
+        int | None,
+        typer.Option(help="Number of top candidates (default: the config's top_n)"),
+    ] = None,
     output: Annotated[str, typer.Option(help="Output: console, json, csv")] = "console",
     output_path: Annotated[str, typer.Option(help="Output file path")] = "",
     as_of: Annotated[str, typer.Option(help="Screen as of date (YYYY-MM-DD), uses PIT data")] = "",
@@ -302,6 +305,9 @@ def screen(
 
     settings = Settings()
     pipeline_config = PipelineConfig.from_yaml(config)
+    # Default to the config's top_n: target_weight is normalized over the printed
+    # list, so a hardcoded 20 would silently size a 10-name book at ~half weight.
+    top_n = top_n if top_n is not None else pipeline_config.top_n
     pipeline = _build_pipeline(pipeline_config, settings, top_n=top_n)
 
     provider, cache = _make_provider(settings)

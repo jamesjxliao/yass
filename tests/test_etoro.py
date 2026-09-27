@@ -3,7 +3,13 @@ from unittest.mock import MagicMock
 
 import pytest
 from screener.trading.broker import RebalanceOrder
-from screener.trading.etoro import EtoroBroker, EtoroPosition, compute_equity
+from screener.trading.etoro import (
+    _MIN_TRIM_FILL_RATIO,
+    EtoroBroker,
+    EtoroPosition,
+    _plan_units,
+    compute_equity,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -237,8 +243,9 @@ class TestExecuteTrim:
         broker._execute_trim(order, positions)
 
         call_args = broker._close_position.call_args
-        # Can't sell more than 5 * 0.999 = 4.995 units
-        assert call_args[1]["units_to_deduct"] <= 5.0
+        # Wanted 50 units, the lot holds 5 — it is consumed entirely, which is
+        # expressed as a full close (units_to_deduct=None), never as an oversell.
+        assert call_args[1]["units_to_deduct"] is None
 
     def test_trim_spreads_across_positions(self):
         from screener.trading.broker import RebalanceOrder
@@ -267,7 +274,7 @@ class TestExecuteTrim:
         from screener.trading.etoro import EtoroPosition
 
         broker = self._make_broker()
-        order = RebalanceOrder(ticker="STX", side="sell", notional=300, trim=True)
+        order = RebalanceOrder(ticker="STX", side="sell", notional=1200, trim=True)
         positions = [
             # Big, old, LOW-basis lot (large embedded gain) — must NOT be touched.
             EtoroPosition(position_id=1, instrument_id=4356, ticker="STX",
@@ -279,11 +286,217 @@ class TestExecuteTrim:
 
         broker._execute_trim(order, positions)
 
-        # $300 at $1000/unit = 0.3 units — fits entirely in the high-basis lot.
+        # $1200 at $1000/unit = 1 whole unit — fits in the high-basis lot.
         broker._close_position.assert_called_once()
         call_args = broker._close_position.call_args
         assert call_args[0][0] == 2  # the open_rate=1100 lot, not the big one
-        assert abs(call_args[1]["units_to_deduct"] - 0.3) < 0.01
+        assert call_args[1]["units_to_deduct"] == 1
+
+    def test_trim_requests_whole_units_only(self):
+        """eToro rejects a fractional UnitsToDeduct (errorCode 776) even on
+        instruments whose unitsQuantityType is 'fractional' — that flag governs
+        OPENING. Units must be floored to whole, never rounded up (oversell)."""
+        from screener.trading.broker import RebalanceOrder
+        from screener.trading.etoro import EtoroPosition
+
+        broker = self._make_broker()
+        # $344 at ~$141.81/unit = 2.43 units → must send 2, not 2.43.
+        order = RebalanceOrder(ticker="PTC", side="sell", notional=344.41, trim=True)
+        positions = [
+            EtoroPosition(position_id=3506207538, instrument_id=5653, ticker="PTC",
+                          amount=2519.62, units=20.15369, open_rate=125.02, pnl=338.37),
+        ]
+
+        requested = broker._execute_trim(order, positions)
+
+        units = broker._close_position.call_args[1]["units_to_deduct"]
+        assert units == 2
+        assert isinstance(units, int)  # no decimal part in the JSON body
+        assert requested == 2.0
+
+    def test_trim_below_one_whole_unit_submits_nothing(self):
+        """A trim worth less than one unit is inexpressible on eToro. It must be
+        a no-op the caller can report as skipped — not a fractional order that
+        the broker silently drops (live incident 2026-08-03)."""
+        from screener.trading.broker import RebalanceOrder
+        from screener.trading.etoro import EtoroPosition
+
+        broker = self._make_broker()
+        # $500 against a ~$1,256/unit name is 0.4 units.
+        order = RebalanceOrder(ticker="SNDK", side="sell", notional=500, trim=True)
+        positions = [
+            EtoroPosition(position_id=1, instrument_id=8804, ticker="SNDK",
+                          amount=2000, units=1.6, open_rate=1250.0, pnl=9.6),
+        ]
+
+        requested = broker._execute_trim(order, positions)
+
+        assert requested == 0.0
+        broker._close_position.assert_not_called()
+
+    def test_trim_caps_a_partly_consumed_sub_position_at_its_whole_units(self):
+        """A lot too big to consume outright can only give up whole units."""
+        from screener.trading.broker import RebalanceOrder
+        from screener.trading.etoro import EtoroPosition
+
+        broker = self._make_broker()
+        order = RebalanceOrder(ticker="INCY", side="sell", notional=600, trim=True)
+        positions = [
+            EtoroPosition(position_id=1, instrument_id=4080, ticker="INCY",
+                          amount=910, units=9.40082, open_rate=96.8, pnl=212.46),
+        ]
+
+        broker._execute_trim(order, positions)
+
+        # $600 / (~$119.4/unit) = 5.01 units wanted from a 9.40-unit lot → 5.
+        assert broker._close_position.call_args[1]["units_to_deduct"] == 5
+
+    def test_trim_consumes_a_fitting_lot_outright_rather_than_flooring_it(self):
+        """The whole-unit rule binds partial deductions only — a sub-position
+        that fits inside the trim is closed ENTIRELY, fraction and all. Flooring
+        it to 9 would leave a 0.40-unit stub for no reason."""
+        from screener.trading.broker import RebalanceOrder
+        from screener.trading.etoro import EtoroPosition
+
+        broker = self._make_broker()
+        order = RebalanceOrder(ticker="INCY", side="sell", notional=1200, trim=True)
+        positions = [
+            EtoroPosition(position_id=1, instrument_id=4080, ticker="INCY",
+                          amount=910, units=9.40082, open_rate=96.8, pnl=212.46),
+        ]
+
+        requested = broker._execute_trim(order, positions)
+
+        assert broker._close_position.call_args[1]["units_to_deduct"] is None
+        assert requested == pytest.approx(9.40082)   # not 9.0
+
+    def test_trim_does_not_skip_a_fractional_high_basis_lot(self):
+        """The flag this closes: `int(units)` made every sub-one-unit lot
+        unusable regardless of basis, so on a high-priced name the dearest lots
+        were skipped and the trim fell through to the older, cheaper, whole-unit
+        one — the FIFO-ish behavior HIFO exists to avoid."""
+        from screener.trading.broker import RebalanceOrder
+        from screener.trading.etoro import EtoroPosition
+
+        broker = self._make_broker()
+        # SNDK-shaped: ~$1,430/unit, so a routine monthly buy IS a fractional lot.
+        order = RebalanceOrder(ticker="SNDK", side="sell", notional=2000, trim=True)
+        positions = [
+            # Old, big, LOW-basis lot — the one FIFO would eat.
+            EtoroPosition(position_id=1, instrument_id=8804, ticker="SNDK",
+                          amount=2300, units=1.63, open_rate=1711.0, pnl=0),
+            # Recent, small, HIGH-basis lots — previously unusable (units < 1).
+            EtoroPosition(position_id=2, instrument_id=8804, ticker="SNDK",
+                          amount=1800, units=0.683, open_rate=2635.0, pnl=0),
+            EtoroPosition(position_id=3, instrument_id=8804, ticker="SNDK",
+                          amount=570, units=0.268, open_rate=2130.0, pnl=0),
+        ]
+
+        broker._execute_trim(order, positions)
+
+        closed = [c[0][0] for c in broker._close_position.call_args_list]
+        assert closed[0] == 2          # dearest lot first...
+        assert closed[1] == 3          # ...then the next dearest
+        assert 1 not in closed         # the cheap lot is left alone
+
+    def test_trim_never_fills_less_than_whole_units_only_would(self):
+        """Fill outranks lot choice: a fractional full close can leave a residue
+        too small for any later whole-unit deduction, so the allocation that
+        sells MORE wins even when it is the tax-blind one."""
+        from screener.trading.broker import RebalanceOrder
+        from screener.trading.etoro import EtoroPosition
+
+        broker = self._make_broker()
+        # 3 units wanted at $100/unit. Taking the 0.6 high-basis lot would strand
+        # 2.4 → only 2 whole units from the big lot = 2.6 total; ignoring it
+        # yields a clean 3.0, so the whole-units plan must win.
+        order = RebalanceOrder(ticker="MU", side="sell", notional=300, trim=True)
+        positions = [
+            EtoroPosition(position_id=1, instrument_id=1130, ticker="MU",
+                          amount=560, units=5.6, open_rate=100.0, pnl=0),
+            EtoroPosition(position_id=2, instrument_id=1130, ticker="MU",
+                          amount=60, units=0.6, open_rate=900.0, pnl=0),
+        ]
+
+        requested = broker._execute_trim(order, positions)
+
+        assert requested == 3.0
+        assert broker._close_position.call_args_list[0][0][0] == 1
+        assert broker._close_position.call_args_list[0][1]["units_to_deduct"] == 3
+
+    def test_fill_ratio_threshold_is_pinned_from_both_sides(self):
+        """Pins _MIN_TRIM_FILL_RATIO so it can't be quietly raised to 1.0 (which
+        deletes the HIFO-preference mechanism) or dropped to 0 (which makes fill
+        irrelevant). Both cases are one lot-size apart."""
+        from screener.trading.etoro import _allocate_trim
+
+        def plans(dear_units):
+            # 3 units wanted; the cheap lot alone could supply all 3. Taking the
+            # fractional dear lot strands the sub-unit remainder, so the shortfall
+            # is worth relatively more the smaller the trim — which is the only
+            # regime where this threshold ever decides anything.
+            positions = [
+                EtoroPosition(position_id=1, instrument_id=1, ticker="X",
+                              amount=2000, units=20.0, open_rate=100.0, pnl=0),
+                EtoroPosition(position_id=2, instrument_id=1, ticker="X",
+                              amount=100, units=dear_units, open_rate=900.0,
+                              pnl=0),
+            ]
+            by_basis = sorted(positions, key=lambda p: (p.open_rate, p.units),
+                              reverse=True)
+            return (_plan_units(_allocate_trim(by_basis, 3.0,
+                                               allow_full_close=True)),
+                    _plan_units(_allocate_trim(by_basis, 3.0,
+                                               allow_full_close=False)))
+
+        # 0.7 dear → mixed fills 2.7 of 3 (90.0%) → exactly at the floor, taken.
+        assert plans(0.7) == (pytest.approx(2.7), 3.0)
+        # 0.6 dear → mixed fills 2.6 of 3 (86.7%) → below it, so the fuller
+        # whole-units plan wins even though it is the tax-blind one.
+        assert plans(0.6) == (pytest.approx(2.6), 3.0)
+        assert 2.6 / 3.0 < _MIN_TRIM_FILL_RATIO <= 2.7 / 3.0
+
+    def test_exact_unit_count_survives_float_division(self):
+        """`notional / price_per_unit` for an exact 4 units lands on
+        3.9999999999999996 (620/6.2 == 100.00000000000001), which a bare int()
+        truncates to 3 — silently dropping a whole unit of trim."""
+        from screener.trading.broker import RebalanceOrder
+        from screener.trading.etoro import EtoroPosition
+
+        broker = self._make_broker()
+        order = RebalanceOrder(ticker="MU", side="sell", notional=400, trim=True)
+        positions = [
+            EtoroPosition(position_id=1, instrument_id=1130, ticker="MU",
+                          amount=560, units=5.6, open_rate=100.0, pnl=0),
+            EtoroPosition(position_id=2, instrument_id=1130, ticker="MU",
+                          amount=60, units=0.6, open_rate=100.0, pnl=0),
+        ]
+
+        broker._execute_trim(order, positions)
+
+        assert broker._close_position.call_args_list[0][1]["units_to_deduct"] == 4
+
+    def test_sub_one_unit_trim_becomes_possible_when_a_small_lot_fits(self):
+        """Previously any trim under one unit was a flat no-op. If a lot is
+        small enough to close outright, the trim is now expressible."""
+        from screener.trading.broker import RebalanceOrder
+        from screener.trading.etoro import EtoroPosition
+
+        broker = self._make_broker()
+        # $500 at ~$1,250/unit = 0.4 units — under one whole unit.
+        order = RebalanceOrder(ticker="SNDK", side="sell", notional=500, trim=True)
+        positions = [
+            EtoroPosition(position_id=1, instrument_id=8804, ticker="SNDK",
+                          amount=1500, units=1.2, open_rate=1250.0, pnl=0),
+            EtoroPosition(position_id=2, instrument_id=8804, ticker="SNDK",
+                          amount=375, units=0.3, open_rate=1250.0, pnl=0),
+        ]
+
+        requested = broker._execute_trim(order, positions)
+
+        assert requested == pytest.approx(0.3)
+        assert broker._close_position.call_args[0][0] == 2
+        assert broker._close_position.call_args[1]["units_to_deduct"] is None
 
 
 class TestExecuteOrdersStopLoss:
@@ -449,15 +662,53 @@ class TestExecuteOrdersUnclearedExit:
         assert status["NEW"] == "submitted"
         broker._open_position.assert_called_once()
 
+    @staticmethod
+    def _trimmed_pos(units):
+        return EtoroPosition(position_id=10, instrument_id=1111, ticker="OLD",
+                             amount=5000, units=units, open_rate=500.0, pnl=0)
+
     def test_trim_residual_not_flagged_as_failed_exit(self, monkeypatch):
         """A trim leaves a residual position by design — it must NOT be treated
         as a failed close even though the ticker is still held afterward."""
         broker = self._make_broker(monkeypatch)
-        broker._execute_trim = MagicMock()
-        broker.get_positions_detailed = MagicMock(return_value=[self._old_pos()])
+        broker._execute_trim = MagicMock(return_value=2.0)  # 2 of 10 units
+        # Phase-1 read (10 units) → trim-verify read (8 units: reduction landed).
+        broker.get_positions_detailed = MagicMock(
+            side_effect=[[self._old_pos()], [self._trimmed_pos(8.0)]])
         orders = [RebalanceOrder(ticker="OLD", side="sell", notional=1000, trim=True)]
         result = broker.execute_orders(orders, dry_run=False)
         assert result[0].status == "submitted"  # residual is expected, not a failure
+
+    def test_unexecuted_trim_is_flagged_and_aborts_buys(self, monkeypatch):
+        """eToro can acknowledge a partial close (HTTP 200 + orderID) and then
+        never execute it. Units are unchanged on the re-read, so the trim must be
+        demoted to an error and Phase-2 buys aborted rather than spending cash
+        the trim never freed (live incident 2026-08-03)."""
+        broker = self._make_broker(monkeypatch)
+        broker._execute_trim = MagicMock(return_value=2.0)
+        # Phase-1 read and trim-verify read both show the ORIGINAL 10 units.
+        broker.get_positions_detailed = MagicMock(return_value=[self._old_pos()])
+        orders = [
+            RebalanceOrder(ticker="OLD", side="sell", notional=1000, trim=True),
+            RebalanceOrder(ticker="NEW", side="buy", notional=1000),
+        ]
+        result = broker.execute_orders(orders, dry_run=False)
+        status = {o.ticker: o.status for o in result}
+        assert status["OLD"].startswith("error")
+        assert "did not take effect" in status["OLD"]
+        assert status["NEW"] == "aborted"
+        broker._open_position.assert_not_called()
+
+    def test_partially_filled_trim_counts_as_confirmed(self, monkeypatch):
+        """A trim spread across sub-positions may land partially; more than half
+        the requested reduction is a real execution, not a silent drop."""
+        broker = self._make_broker(monkeypatch)
+        broker._execute_trim = MagicMock(return_value=2.0)
+        broker.get_positions_detailed = MagicMock(
+            side_effect=[[self._old_pos()], [self._trimmed_pos(8.7)]])  # 1.3 of 2.0
+        orders = [RebalanceOrder(ticker="OLD", side="sell", notional=1000, trim=True)]
+        result = broker.execute_orders(orders, dry_run=False)
+        assert result[0].status == "submitted"
 
 
 class TestExecuteOrdersWeightCompleteness:
@@ -601,3 +852,64 @@ class TestAwaitPositionState:
             {"NEW"}, want_present=True, timeout=10, interval=0.0)
         assert pending == {"NEW"}
         assert broker.get_positions_detailed.call_count == 1
+
+
+class TestAwaitUnitsReduction:
+    """Trims can't be verified by presence (a residual is expected), so they are
+    verified by unit count — the gap that let an acknowledged-but-never-executed
+    partial close be logged as 'submitted' (live incident 2026-08-03)."""
+
+    @staticmethod
+    def _pos(units, pid=1):
+        return EtoroPosition(position_id=pid, instrument_id=1, ticker="OLD",
+                             amount=1, units=units, open_rate=1.0, pnl=0)
+
+    def test_reduction_confirmed_on_a_later_poll(self):
+        broker = EtoroBroker(api_key="k", user_key="u", demo=True)
+        # Endpoint lags: units unchanged twice, then the trim shows up.
+        broker.get_positions_detailed = MagicMock(
+            side_effect=[[self._pos(10.0)], [self._pos(10.0)], [self._pos(8.0)]])
+        pending = broker._await_units_reduction(
+            {"OLD": (10.0, 2.0)}, timeout=10, interval=0.001)
+        assert pending == set()
+
+    def test_unchanged_units_surface_as_unconfirmed(self):
+        broker = EtoroBroker(api_key="k", user_key="u", demo=True)
+        broker.get_positions_detailed = MagicMock(return_value=[self._pos(10.0)])
+        pending = broker._await_units_reduction(
+            {"OLD": (10.0, 2.0)}, timeout=0.03, interval=0.01)
+        assert pending == {"OLD"}
+
+    def test_sums_units_across_sub_positions(self):
+        broker = EtoroBroker(api_key="k", user_key="u", demo=True)
+        # 6+4=10 before, 6+2.5=8.5 after → 1.5 of 2.0 requested, over the half bar.
+        broker.get_positions_detailed = MagicMock(
+            return_value=[self._pos(6.0, pid=1), self._pos(2.5, pid=2)])
+        pending = broker._await_units_reduction(
+            {"OLD": (10.0, 2.0)}, timeout=10, interval=0.001)
+        assert pending == set()
+
+
+class TestAwaitSellProceeds:
+    """eToro credits closes asynchronously; sizing buys off the pre-sell balance
+    undersized/skipped fundable buys (live incident 2026-08-03)."""
+
+    def test_returns_once_proceeds_land(self):
+        broker = EtoroBroker(api_key="k", user_key="u", demo=True)
+        broker.get_account = MagicMock(side_effect=[
+            {"cash": 20.0}, {"cash": 20.0}, {"cash": 880.0}])
+        cash = broker._await_sell_proceeds(20.0, 863.0, timeout=10, interval=0.001)
+        assert cash == 880.0
+
+    def test_returns_best_seen_on_timeout(self):
+        broker = EtoroBroker(api_key="k", user_key="u", demo=True)
+        broker.get_account = MagicMock(return_value={"cash": 20.0})
+        cash = broker._await_sell_proceeds(20.0, 863.0, timeout=0.03, interval=0.01)
+        assert cash == 20.0  # degrades to available cash rather than hanging
+
+    def test_no_expected_proceeds_skips_polling(self):
+        broker = EtoroBroker(api_key="k", user_key="u", demo=True)
+        broker.get_account = MagicMock()
+        cash = broker._await_sell_proceeds(20.0, 0.0, timeout=10, interval=0.001)
+        assert cash == 20.0
+        broker.get_account.assert_not_called()

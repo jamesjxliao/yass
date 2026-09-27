@@ -32,6 +32,13 @@ _CLOSE_SETTLE_SECONDS = 3.0
 # buys; better to wait than to leave a swap half-done and re-trade it.
 _SETTLE_TIMEOUT_SECONDS = 90.0
 
+# A trim prefers HIFO sub-positions, but taking a fractional lot can strand a
+# residue too small for any later whole-unit deduction. Accept the HIFO-richer
+# allocation only while it still fills this fraction of the whole-units-only
+# one: a rounding-level shortfall shouldn't forfeit the tax benefit, a
+# materially smaller trim should. Fill stays the primary goal.
+_MIN_TRIM_FILL_RATIO = 0.9
+
 
 @dataclass
 class EtoroPosition:
@@ -105,6 +112,58 @@ def compute_equity(portfolio: dict) -> dict:
         "buying_power": available_cash,
         "portfolio_value": total_invested + unrealized_pnl,
     }
+
+
+def _plan_units(plan: list[tuple[EtoroPosition, float, bool]]) -> float:
+    """Total units a trim allocation would sell."""
+    return float(sum(units for _pos, units, _full in plan))
+
+
+def _whole(units: float) -> int:
+    """Whole units in ``units``, tolerant of float division noise.
+
+    A bare ``int()`` truncates 2.9999999999999996 — which is what
+    ``notional / price_per_unit`` produces for an exact 3 units, since
+    ``620 / 6.2 == 100.00000000000001`` — costing a whole unit of trim. The
+    epsilon only moves values already within 1e-9 of an integer, so it can
+    never round a genuinely fractional amount up into an oversell.
+    """
+    return int(units + 1e-9)
+
+
+def _allocate_trim(
+    by_basis: list[EtoroPosition],
+    desired: float,
+    *,
+    allow_full_close: bool,
+) -> list[tuple[EtoroPosition, float, bool]]:
+    """Assign ``desired`` units across sub-positions, highest basis first.
+
+    Returns ``(position, units, full_close)``. A sub-position is taken whole when
+    it fits inside what is left (any size — a full close has no whole-unit
+    rule); otherwise only whole units can be deducted from it. The flag is NOT
+    derivable from ``units == pos.units``: the whole-units-only allocation can
+    consume a sub-position entirely and still have to send it as a partial
+    ``UnitsToDeduct``, which is a different API call.
+
+    Never exceeds ``desired``: fractional remainders are dropped, never rounded
+    up into an oversell.
+    """
+    picks: list[tuple[EtoroPosition, float, bool]] = []
+    remaining = desired
+    for pos in by_basis:
+        if remaining <= 0:
+            break
+        if allow_full_close and 0 < pos.units <= remaining:
+            picks.append((pos, pos.units, True))
+            remaining -= pos.units
+            continue
+        take = _whole(min(remaining, pos.units))
+        if take < 1:
+            continue
+        picks.append((pos, float(take), False))
+        remaining -= take
+    return picks
 
 
 class EtoroBroker:
@@ -335,7 +394,11 @@ class EtoroBroker:
     ) -> dict:
         body: dict = {"InstrumentId": instrument_id}
         if units_to_deduct is not None:
-            body["UnitsToDeduct"] = round(units_to_deduct, 5)
+            # eToro rejects a fractional UnitsToDeduct (errorCode 776, "only whole
+            # units are allowed") even on instruments whose unitsQuantityType is
+            # 'fractional' — that flag governs OPENING, not partial closes. Send an
+            # int so the JSON carries no decimal part.
+            body["UnitsToDeduct"] = int(units_to_deduct)
         resp = self._request_with_retry(
             "post",
             self._execution_url(f"market-close-orders/positions/{position_id}"),
@@ -346,8 +409,11 @@ class EtoroBroker:
 
     def _execute_trim(
         self, order: RebalanceOrder, positions: list[EtoroPosition],
-    ) -> None:
+    ) -> float:
         """Partially close positions to reduce a holding by order.notional dollars.
+
+        Returns the number of units actually requested for deduction, so the
+        caller can verify the trim took effect (see `_await_units_reduction`).
 
         Sub-positions are consumed HIFO — highest ``open_rate`` (cost basis)
         first — so a trim realizes the smallest gain (or largest loss) per unit
@@ -357,32 +423,68 @@ class EtoroBroker:
         realize the *biggest* embedded gains — FIFO-style lot cycling that
         converts long-term gains into short-term ones in a taxable account.
         Ties fall back to largest-units-first to minimize close calls.
+
+        **The whole-unit rule binds PARTIAL closes only.** eToro rejects a
+        fractional ``UnitsToDeduct`` (errorCode 776), but a sub-position can
+        always be closed in its ENTIRETY whatever its size — that is how full
+        exits already sell fractional holdings. Treating both alike made every
+        sub-one-unit lot unusable regardless of basis, which silently
+        de-optimized HIFO exactly on high-priced names (SNDK ~$1,437/unit, where
+        a routine monthly buy IS a fractional lot): the dearest lots were
+        skipped and the trim fell through to the older, cheaper, whole-unit
+        ones — the FIFO-ish behavior HIFO exists to avoid.
+
+        Fill still outranks lot choice: both allocations are costed and the
+        HIFO-richer one is taken only if it clears ``_MIN_TRIM_FILL_RATIO`` of
+        the other — see that constant for why.
         """
         total_value = sum(p.amount + p.pnl for p in positions)
         total_units = sum(p.units for p in positions)
         if total_value <= 0 or total_units <= 0:
             raise ValueError(f"No value to trim for {order.ticker}")
         price_per_unit = total_value / total_units
-        units_to_sell = order.notional / price_per_unit
+        desired = order.notional / price_per_unit
 
-        sorted_positions = sorted(
+        by_basis = sorted(
             positions, key=lambda p: (p.open_rate, p.units), reverse=True
         )
-        remaining = units_to_sell
-        for i, pos in enumerate(sorted_positions):
-            if remaining <= 0:
-                break
-            deduct = min(remaining, pos.units * 0.999)
-            if deduct < 0.001:
-                continue
+        mixed = _allocate_trim(by_basis, desired, allow_full_close=True)
+        whole = _allocate_trim(by_basis, desired, allow_full_close=False)
+        plan, plan_units = whole, _plan_units(whole)
+        if _plan_units(mixed) >= plan_units * _MIN_TRIM_FILL_RATIO:
+            plan, plan_units = mixed, _plan_units(mixed)
+
+        if not plan:
+            logger.info(
+                "TRIM %s: $%.2f (~%.4f units at $%.2f) cannot be expressed — no "
+                "sub-position is a whole unit or small enough to close outright; "
+                "leaving position as-is",
+                order.ticker, order.notional, desired, price_per_unit,
+            )
+            return 0.0
+
+        for i, (pos, units, full_close) in enumerate(plan):
             if i > 0:
                 time.sleep(0.5)
-            self._close_position(pos.position_id, pos.instrument_id, units_to_deduct=deduct)
-            remaining -= deduct
-            logger.info(
-                "TRIM %s pos=%d: %.5f units ($%.2f)",
-                order.ticker, pos.position_id, deduct, deduct * price_per_unit,
+            resp = self._close_position(
+                pos.position_id, pos.instrument_id,
+                # None ⇒ close the sub-position outright (any size). A partial
+                # deduction stays a whole int at the call site, so the 776
+                # fractional rejection can't be reintroduced from here.
+                units_to_deduct=None if full_close else int(units),
             )
+            # Log the broker's order acknowledgement. eToro returns an
+            # orderForClose object (orderID/statusID) on HTTP 200 even for
+            # partial closes it later drops without executing, so recording the
+            # id is what makes such a drop traceable after the fact.
+            ack = (resp or {}).get("orderForClose") or {}
+            logger.info(
+                "TRIM %s pos=%d: %.6f units ($%.2f, %s) — orderID=%s statusID=%s",
+                order.ticker, pos.position_id, units, units * price_per_unit,
+                "full close" if full_close else "partial", ack.get("orderID"),
+                ack.get("statusID"),
+            )
+        return plan_units
 
     def _cancel_open_order(self, order_id: int) -> dict:
         resp = self._client.delete(
@@ -463,6 +565,79 @@ class EtoroBroker:
             if not pending or interval <= 0 or time.monotonic() >= deadline:
                 return pending
 
+    def _await_units_reduction(
+        self,
+        baseline: dict[str, tuple[float, float]],
+        *,
+        timeout: float = _SETTLE_TIMEOUT_SECONDS,
+        interval: float | None = None,
+    ) -> set[str]:
+        """Poll until each trimmed ticker's unit count actually drops.
+
+        `baseline` maps ticker -> (units_held_before, units_requested). Returns
+        the tickers whose reduction never became visible — empty means all
+        confirmed.
+
+        Trims cannot be verified by presence the way full exits are (a trim
+        leaves a residual position by design), so they were previously the one
+        close path with NO verification at all. eToro accepts a partial close
+        with HTTP 200 and a real orderID, then may silently never execute it —
+        observed live 2026-08-03, where two trims were reported "submitted"
+        while units and cash stayed unchanged for 7+ minutes and the order
+        appeared in no queue. Checking units closes that gap.
+
+        A trim counts as confirmed once at least half the requested reduction is
+        visible, which tolerates a partial fill across sub-positions while still
+        catching "nothing happened at all".
+        """
+        if interval is None:
+            interval = _CLOSE_SETTLE_SECONDS
+        pending = set(baseline)
+        deadline = time.monotonic() + timeout
+        while True:
+            time.sleep(interval)  # settle before (re-)reading
+            units_now: dict[str, float] = {}
+            for p in self.get_positions_detailed():
+                units_now[p.ticker] = units_now.get(p.ticker, 0.0) + p.units
+            pending = {
+                t for t in pending
+                if (baseline[t][0] - units_now.get(t, 0.0)) < baseline[t][1] * 0.5
+            }
+            if not pending or interval <= 0 or time.monotonic() >= deadline:
+                return pending
+
+    def _await_sell_proceeds(
+        self,
+        starting_cash: float,
+        expected_proceeds: float,
+        *,
+        timeout: float = _SETTLE_TIMEOUT_SECONDS,
+        interval: float | None = None,
+    ) -> float:
+        """Poll until closed-position proceeds are credited, returning cash.
+
+        eToro credits closes asynchronously. Reading cash immediately after
+        submitting sells sees the PRE-sell balance, so every Phase-2 buy is
+        sized against money that has not landed yet — observed live 2026-08-03,
+        where buys were sized ~1s after the sells and saw $19.68 instead of the
+        ~$863 the trims would have freed, undersizing one buy and skipping
+        another entirely. Waits for most of the expected proceeds rather than a
+        fixed sleep, and returns whatever cash is available at timeout so a
+        slow credit degrades to the old behaviour instead of hanging.
+        """
+        if interval is None:
+            interval = _CLOSE_SETTLE_SECONDS
+        cash = starting_cash
+        if expected_proceeds <= 0:
+            return cash
+        target = starting_cash + expected_proceeds * 0.9
+        deadline = time.monotonic() + timeout
+        while True:
+            time.sleep(interval)
+            cash = max(cash, self.get_account().get("cash", 0.0))
+            if cash >= target or interval <= 0 or time.monotonic() >= deadline:
+                return cash
+
     def execute_orders(
         self,
         orders: list[RebalanceOrder],
@@ -500,6 +675,7 @@ class EtoroBroker:
         for p in detailed:
             pos_by_ticker.setdefault(p.ticker, []).append(p)
 
+        trim_baseline: dict[str, tuple[float, float]] = {}
         for order in sells:
             positions_to_close = pos_by_ticker.get(order.ticker, [])
             if not positions_to_close:
@@ -508,7 +684,17 @@ class EtoroBroker:
                 continue
             try:
                 if order.trim:
-                    self._execute_trim(order, positions_to_close)
+                    units_before = sum(p.units for p in positions_to_close)
+                    requested = self._execute_trim(order, positions_to_close)
+                    if requested <= 0:
+                        # No sub-position was a whole unit or small enough to
+                        # close outright, so nothing was submitted. Not a
+                        # failure, and must not abort the buys. `_execute_trim`
+                        # has already logged the specific reason.
+                        order.status = "skipped: not expressible in tradeable units"
+                        order.notional = 0.0
+                        continue
+                    trim_baseline[order.ticker] = (units_before, requested)
                 else:
                     for i, pos in enumerate(positions_to_close):
                         if i > 0:
@@ -542,6 +728,24 @@ class EtoroBroker:
                         order.ticker, _SETTLE_TIMEOUT_SECONDS,
                     )
 
+        # Verify trims actually reduced the position. A trim leaves a residual by
+        # design, so the presence check above cannot see it — units must be
+        # compared instead. Without this, an accepted-but-never-executed partial
+        # close is logged "submitted" and Phase-2 buys spend cash it never freed.
+        trims = [o for o in sells
+                 if o.trim and o.ticker in trim_baseline
+                 and not o.status.startswith("error")]
+        if trims:
+            unreduced = self._await_units_reduction(trim_baseline)
+            for order in trims:
+                if order.ticker in unreduced:
+                    order.status = "error: trim did not take effect (units unchanged)"
+                    logger.error(
+                        "SELL %s (trim) — units unchanged %.0fs after close; the "
+                        "order was acknowledged but never executed",
+                        order.ticker, _SETTLE_TIMEOUT_SECONDS,
+                    )
+
         failed_sells = [o for o in sells if o.status.startswith("error")]
         if failed_sells:
             logger.error(
@@ -555,6 +759,15 @@ class EtoroBroker:
 
         # Phase 2: open buy positions
         if buys:
+            # Let the sell proceeds land before sizing anything: eToro credits
+            # closes asynchronously, and sizing off the pre-sell balance
+            # undersizes or skips buys that the preview showed as fundable.
+            confirmed_sells = [o for o in sells if o.status == "submitted"]
+            if confirmed_sells:
+                pre_sell_cash = self.get_account().get("cash", 0.0)
+                self._await_sell_proceeds(
+                    pre_sell_cash, sum(o.notional for o in confirmed_sells),
+                )
             account = self.get_account()
             buy_tickers = {o.ticker for o in buys}
             exited_tickers = {o.ticker for o in sells
