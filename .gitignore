@@ -61,3 +61,6 @@ data/events/*
 data/jkp_mega/*
 # Spin-off events/factors: derived from licensed Sharadar rows — local-only
 data/spinoffs/
+# Universe-expansion research data: derived from licensed Sharadar rows — local-only
+data/universe_x/
+data/sf3_best/
